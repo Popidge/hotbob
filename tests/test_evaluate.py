@@ -37,4 +37,6 @@ def test_evaluate_loads_checkpoint(tmp_path, monkeypatch, capsys) -> None:
     output = capsys.readouterr().out
     assert "teacher-forced prewrite" in output
     assert "predicted-write prewrite" in output
+    assert "sequential teacher-forced" in output
+    assert "sequential predicted" in output
     assert "Memory write metrics" in output
