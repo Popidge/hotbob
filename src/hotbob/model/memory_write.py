@@ -17,23 +17,23 @@ class MemoryWrite(nn.Module):
         num_authority: int,
     ) -> None:
         super().__init__()
-        self.op = nn.Linear(d_model, 4)
-        self.slot = nn.Linear(d_model, num_slots)
-        self.type = nn.Linear(d_model, num_types)
-        self.scope = nn.Linear(d_model, num_scopes)
-        self.privacy = nn.Linear(d_model, num_privacy)
-        self.authority = nn.Linear(d_model, num_authority)
-        self.value = nn.Linear(d_model, d_model)
-        self.gate = nn.Linear(d_model, 1)
+        self.op_head = nn.Linear(d_model, 4)
+        self.slot_head = nn.Linear(d_model, num_slots)
+        self.type_head = nn.Linear(d_model, num_types)
+        self.scope_head = nn.Linear(d_model, num_scopes)
+        self.privacy_head = nn.Linear(d_model, num_privacy)
+        self.authority_head = nn.Linear(d_model, num_authority)
+        self.value_head = nn.Linear(d_model, d_model)
+        self.gate_head = nn.Linear(d_model, 1)
 
     def forward(self, boundary_hidden: torch.Tensor) -> dict[str, torch.Tensor]:
         return {
-            "op_logits": self.op(boundary_hidden),
-            "slot_logits": self.slot(boundary_hidden),
-            "type_logits": self.type(boundary_hidden),
-            "scope_logits": self.scope(boundary_hidden),
-            "privacy_logits": self.privacy(boundary_hidden),
-            "authority_logits": self.authority(boundary_hidden),
-            "value_vector": self.value(boundary_hidden),
-            "write_gate": torch.sigmoid(self.gate(boundary_hidden)),
+            "op_logits": self.op_head(boundary_hidden),
+            "slot_logits": self.slot_head(boundary_hidden),
+            "type_logits": self.type_head(boundary_hidden),
+            "scope_logits": self.scope_head(boundary_hidden),
+            "privacy_logits": self.privacy_head(boundary_hidden),
+            "authority_logits": self.authority_head(boundary_hidden),
+            "value_vector": self.value_head(boundary_hidden),
+            "write_gate": torch.sigmoid(self.gate_head(boundary_hidden)),
         }

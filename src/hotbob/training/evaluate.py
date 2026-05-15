@@ -30,3 +30,7 @@ def main() -> None:
     table.add_row("secret leak failures", "0")
     table.add_row("wrong-scope retrieval failures", "0")
     Console().print(table)
+
+
+if __name__ == "__main__":
+    main()

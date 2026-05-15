@@ -22,11 +22,7 @@ def make_standing_order_trace(rng: random.Random, idx: int) -> TaskTrace:
         if civilians
         else "Enemy powers weapons. Civilians absent."
     )
-    action = (
-        ActionLabel.FIRE_WEAPONS
-        if civilians
-        else rng.choice([ActionLabel.RAISE_SHIELDS, ActionLabel.HOLD_FIRE])
-    )
+    action = ActionLabel.FIRE_WEAPONS if civilians else ActionLabel.HOLD_FIRE
     return TaskTrace(
         events=[
             TraceEvent(
