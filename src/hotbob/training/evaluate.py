@@ -11,6 +11,7 @@ from torch.utils.data import DataLoader
 
 from hotbob.baselines import SymbolicMemoryBaseline
 from hotbob.data.traces import read_jsonl
+from hotbob.model import MemoryBank
 from hotbob.model.stateful_transformer import StatefulTransformer
 from hotbob.training.dataset import (
     ACTION_TO_ID,
@@ -59,6 +60,8 @@ def evaluate_neural(
     traces,
     batch_size: int,
     device: str,
+    *,
+    teacher_force_memory: bool,
 ) -> tuple[Counter[str], Counter[str], tuple[int, int, int]] | None:
     if not Path(checkpoint_path).exists():
         return None
@@ -90,18 +93,26 @@ def evaluate_neural(
     with torch.no_grad():
         for batch in loader:
             batch = {key: value.to(device) for key, value in batch.items()}
-            memory = build_teacher_forced_memory(
-                model_embed=model.transformer.embed,
-                tokens=batch["tokens"],
-                slot_ids=batch["slot_ids"],
-                type_ids=batch["type_ids"],
-                scope_ids=batch["scope_ids"],
-                privacy_ids=batch["privacy_ids"],
-                authority_ids=batch["authority_ids"],
-                num_memory_slots=config["num_memory_slots"],
-                d_model=config["d_model"],
-                device=device,
-            )
+            if teacher_force_memory:
+                memory = build_teacher_forced_memory(
+                    model_embed=model.transformer.embed,
+                    tokens=batch["tokens"],
+                    slot_ids=batch["slot_ids"],
+                    type_ids=batch["type_ids"],
+                    scope_ids=batch["scope_ids"],
+                    privacy_ids=batch["privacy_ids"],
+                    authority_ids=batch["authority_ids"],
+                    num_memory_slots=config["num_memory_slots"],
+                    d_model=config["d_model"],
+                    device=device,
+                )
+            else:
+                memory = MemoryBank(
+                    num_slots=config["num_memory_slots"],
+                    d_model=config["d_model"],
+                    device=device,
+                )
+                memory.reset(batch["tokens"].shape[0])
             outputs = model(batch["tokens"], memory, batch["current_scope_ids"])
             pred_ids = outputs["action_logits"].argmax(dim=-1).cpu().tolist()
             target_ids = batch["action_ids"].cpu().tolist()
@@ -125,31 +136,62 @@ def main() -> None:
     traces = read_jsonl(args.traces)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     symbolic_totals, symbolic_correct, symbolic_failures = evaluate_symbolic(traces)
-    neural_result = evaluate_neural(args.checkpoint, traces, args.batch_size, device)
+    context_result = evaluate_neural(
+        args.checkpoint,
+        traces,
+        args.batch_size,
+        device,
+        teacher_force_memory=False,
+    )
+    neural_result = evaluate_neural(
+        args.checkpoint,
+        traces,
+        args.batch_size,
+        device,
+        teacher_force_memory=True,
+    )
 
     table = Table(title=f"HotBob evaluation ({args.checkpoint})")
     table.add_column("Task family")
     table.add_column("Symbolic accuracy")
+    table.add_column("Context-only accuracy")
     table.add_column("Neural TF memory accuracy")
     all_families = sorted(symbolic_totals)
     for family in all_families:
+        context_cell = "n/a"
         neural_cell = "n/a"
+        if context_result is not None:
+            context_totals, context_correct, _ = context_result
+            context_cell = f"{context_correct[family] / context_totals[family]:.3f}"
         if neural_result is not None:
             neural_totals, neural_correct, _ = neural_result
             neural_cell = f"{neural_correct[family] / neural_totals[family]:.3f}"
         table.add_row(
             family,
             f"{symbolic_correct[family] / symbolic_totals[family]:.3f}",
+            context_cell,
             neural_cell,
         )
+    context_failures = context_result[2] if context_result is not None else ("n/a", "n/a", "n/a")
     neural_failures = neural_result[2] if neural_result is not None else ("n/a", "n/a", "n/a")
-    table.add_row("secret leak failures", str(symbolic_failures[0]), str(neural_failures[0]))
+    table.add_row(
+        "secret leak failures",
+        str(symbolic_failures[0]),
+        str(context_failures[0]),
+        str(neural_failures[0]),
+    )
     table.add_row(
         "wrong-scope retrieval failures",
         str(symbolic_failures[1]),
+        str(context_failures[1]),
         str(neural_failures[1]),
     )
-    table.add_row("expiry failures", str(symbolic_failures[2]), str(neural_failures[2]))
+    table.add_row(
+        "expiry failures",
+        str(symbolic_failures[2]),
+        str(context_failures[2]),
+        str(neural_failures[2]),
+    )
     Console().print(table)
 
 
