@@ -377,24 +377,56 @@ def apply_teacher_op(
     )
 
 
-def apply_predicted_op(memory: MemoryBank, outputs: dict[str, torch.Tensor]) -> None:
+def apply_predicted_op(
+    memory: MemoryBank,
+    outputs: dict[str, torch.Tensor],
+    *,
+    model: StatefulTransformer | None = None,
+    dataset: TraceDataset | None = None,
+    target_op=None,
+    slot_idx: int | None = None,
+    device: str | None = None,
+    oracle_slot: bool = False,
+    oracle_scope: bool = False,
+    oracle_value: bool = False,
+) -> None:
     op = ID_TO_OP[int(outputs["op_logits"].argmax(dim=-1)[0].item())]
-    slot_idx = int(outputs["slot_logits"].argmax(dim=-1)[0].item())
+    selected_slot = (
+        slot_idx
+        if oracle_slot and slot_idx is not None
+        else int(outputs["slot_logits"].argmax(dim=-1)[0].item())
+    )
     if op == MemoryOpName.NOOP:
         return
     if op == MemoryOpName.DELETE:
-        memory.apply_delete(0, slot_idx)
+        memory.apply_delete(0, selected_slot)
         return
-    vector = outputs["value_vector"][0].detach()
-    if op == MemoryOpName.UPDATE and bool(memory.occupied[0, slot_idx].item()):
-        memory.apply_update(0, slot_idx, vector, gate=float(outputs["write_gate"][0, 0].item()))
+    if (
+        oracle_value
+        and model is not None
+        and dataset is not None
+        and target_op is not None
+        and device
+    ):
+        vector = value_vector_for_op(model, dataset, target_op.value, device)
+    else:
+        vector = outputs["value_vector"][0].detach()
+    scope_id = (
+        dataset.scope_vocab.get(target_op.scope, 0)
+        if oracle_scope and dataset is not None and target_op is not None
+        else int(outputs["scope_logits"].argmax(dim=-1)[0].item())
+    )
+    if op == MemoryOpName.UPDATE and bool(memory.occupied[0, selected_slot].item()):
+        memory.apply_update(
+            0, selected_slot, vector, gate=float(outputs["write_gate"][0, 0].item())
+        )
         return
     memory.apply_write(
         0,
-        slot_idx,
+        selected_slot,
         vector,
         type_id=int(outputs["type_logits"].argmax(dim=-1)[0].item()),
-        scope_id=int(outputs["scope_logits"].argmax(dim=-1)[0].item()),
+        scope_id=scope_id,
         privacy_id=int(outputs["privacy_logits"].argmax(dim=-1)[0].item()),
         authority_id=int(outputs["authority_logits"].argmax(dim=-1)[0].item()),
         strength=float(outputs["write_gate"][0, 0].item()),
@@ -412,6 +444,10 @@ def evaluate_sequential_neural(
     if loaded is None:
         return None
     model, dataset, config = loaded
+    oracle_slot = "oracle_slot" in memory_mode
+    oracle_scope = "oracle_scope" in memory_mode
+    oracle_value = "oracle_value" in memory_mode
+    use_predicted = memory_mode == "predicted" or memory_mode.startswith("predicted_")
     totals: Counter[str] = Counter()
     correct: Counter[str] = Counter()
     memory_required_total = 0
@@ -479,10 +515,21 @@ def evaluate_sequential_neural(
                         write_correct[name] += int(pred_id == target_id)
                     if memory_mode == "teacher_forced":
                         apply_teacher_op(memory, model, dataset, trace, op_index, device)
-                    elif memory_mode == "predicted":
-                        apply_predicted_op(memory, outputs)
+                    elif use_predicted:
+                        apply_predicted_op(
+                            memory,
+                            outputs,
+                            model=model,
+                            dataset=dataset,
+                            target_op=target_op,
+                            slot_idx=min(op_index, memory.num_slots - 1),
+                            device=device,
+                            oracle_slot=oracle_slot,
+                            oracle_scope=oracle_scope,
+                            oracle_value=oracle_value,
+                        )
                     op_index += 1
-                elif memory_mode == "predicted":
+                elif use_predicted:
                     apply_predicted_op(memory, outputs)
 
             final_tokens, final_lengths = encode_event_tensor(
@@ -575,6 +622,32 @@ def main() -> None:
         device,
         memory_mode="predicted",
     )
+    oracle_ablation_results = {
+        "predicted + oracle slot": evaluate_sequential_neural(
+            args.checkpoint,
+            traces,
+            device,
+            memory_mode="predicted_oracle_slot",
+        ),
+        "predicted + oracle scope": evaluate_sequential_neural(
+            args.checkpoint,
+            traces,
+            device,
+            memory_mode="predicted_oracle_scope",
+        ),
+        "predicted + oracle value": evaluate_sequential_neural(
+            args.checkpoint,
+            traces,
+            device,
+            memory_mode="predicted_oracle_value",
+        ),
+        "predicted + oracle all": evaluate_sequential_neural(
+            args.checkpoint,
+            traces,
+            device,
+            memory_mode="predicted_oracle_slot_oracle_scope_oracle_value",
+        ),
+    }
 
     table = Table(title=f"HotBob evaluation ({args.checkpoint})")
     table.add_column("Task family")
@@ -687,10 +760,29 @@ def main() -> None:
         ("sequential predicted", sequential_predicted_result),
     ]:
         retrieval_table.add_row(name, read_target_mass(result))
+    ablation_table = Table(title="Sequential predicted oracle ablations")
+    ablation_table.add_column("Mode")
+    ablation_table.add_column("Memory-required accuracy")
+    ablation_table.add_column("Target-slot read mass")
+    ablation_table.add_column("Boundary F1")
+    ablation_table.add_row(
+        "predicted baseline",
+        memory_required_accuracy(sequential_predicted_result),
+        read_target_mass(sequential_predicted_result),
+        boundary_scores(sequential_predicted_result)[2],
+    )
+    for name, result in oracle_ablation_results.items():
+        ablation_table.add_row(
+            name,
+            memory_required_accuracy(result),
+            read_target_mass(result),
+            boundary_scores(result)[2],
+        )
     Console().print(table)
     Console().print(memory_table)
     Console().print(boundary_table)
     Console().print(retrieval_table)
+    Console().print(ablation_table)
 
 
 if __name__ == "__main__":

@@ -42,3 +42,4 @@ def test_evaluate_loads_checkpoint(tmp_path, monkeypatch, capsys) -> None:
     assert "Memory write metrics" in output
     assert "Boundary write decision metrics" in output
     assert "Memory retrieval metrics" in output
+    assert "Sequential predicted oracle ablations" in output
