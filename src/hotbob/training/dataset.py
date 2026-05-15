@@ -79,6 +79,15 @@ def build_scope_vocab(traces: Sequence[TaskTrace]) -> dict[str, int]:
 class EncodedTrace:
     write_tokens: list[int]
     action_tokens: list[int]
+    event_tokens: list[list[int]]
+    event_op_ids: list[int]
+    event_type_ids: list[int]
+    event_scope_ids: list[int]
+    event_privacy_ids: list[int]
+    event_authority_ids: list[int]
+    event_slot_ids: list[int]
+    event_has_write: list[bool]
+    event_memory_value_tokens: list[list[int]]
     memory_value_tokens: list[int]
     current_scope_id: int
     action_id: int
@@ -128,9 +137,19 @@ class TraceDataset(Dataset[EncodedTrace]):
         write_tokens = self._encode_event(write_event, trace.current_scope)
         action_tokens = self._encode_event(action_event, trace.current_scope)
         memory_value_tokens = self.vocab.encode(tokenize_text(first_op.value))
+        event_targets = self._encode_event_write_targets(trace)
         return EncodedTrace(
             write_tokens=write_tokens[-self.max_seq_len :],
             action_tokens=action_tokens[-self.max_seq_len :],
+            event_tokens=event_targets["tokens"],
+            event_op_ids=event_targets["op_ids"],
+            event_type_ids=event_targets["type_ids"],
+            event_scope_ids=event_targets["scope_ids"],
+            event_privacy_ids=event_targets["privacy_ids"],
+            event_authority_ids=event_targets["authority_ids"],
+            event_slot_ids=event_targets["slot_ids"],
+            event_has_write=event_targets["has_write"],
+            event_memory_value_tokens=event_targets["memory_value_tokens"],
             memory_value_tokens=memory_value_tokens,
             current_scope_id=self.scope_vocab[trace.current_scope],
             action_id=ACTION_TO_ID[trace.expected_final_action],
@@ -156,15 +175,77 @@ class TraceDataset(Dataset[EncodedTrace]):
             return scoped_ops[0]
         return trace.expected_memory_ops[0]
 
+    def _encode_event_write_targets(self, trace: TaskTrace) -> dict[str, list]:
+        tokens: list[list[int]] = []
+        op_ids: list[int] = []
+        type_ids: list[int] = []
+        scope_ids: list[int] = []
+        privacy_ids: list[int] = []
+        authority_ids: list[int] = []
+        slot_ids: list[int] = []
+        has_write: list[bool] = []
+        memory_value_tokens: list[list[int]] = []
+        op_index = 0
+        default_op = trace.expected_memory_ops[0]
+        for event in trace.events[:-1]:
+            tokens.append(self._encode_event(event, trace.current_scope)[-self.max_seq_len :])
+            target_op = (
+                trace.expected_memory_ops[op_index]
+                if op_index < len(trace.expected_memory_ops)
+                else None
+            )
+            if target_op is not None and (event.scope or trace.current_scope) == target_op.scope:
+                op_ids.append(OP_TO_ID[target_op.op])
+                type_ids.append(TYPE_TO_ID[target_op.type])
+                scope_ids.append(self.scope_vocab[target_op.scope])
+                privacy_ids.append(PRIVACY_TO_ID[target_op.privacy])
+                authority_ids.append(AUTHORITY_TO_ID[target_op.authority])
+                slot_ids.append(min(op_index, 31))
+                has_write.append(True)
+                memory_value_tokens.append(self.vocab.encode(tokenize_text(target_op.value)))
+                op_index += 1
+            else:
+                op_ids.append(OP_TO_ID[MemoryOpName.NOOP])
+                type_ids.append(TYPE_TO_ID[default_op.type])
+                scope_ids.append(self.scope_vocab[event.scope or trace.current_scope])
+                privacy_ids.append(PRIVACY_TO_ID[default_op.privacy])
+                authority_ids.append(AUTHORITY_TO_ID[default_op.authority])
+                slot_ids.append(0)
+                has_write.append(False)
+                memory_value_tokens.append([0])
+        return {
+            "tokens": tokens,
+            "op_ids": op_ids,
+            "type_ids": type_ids,
+            "scope_ids": scope_ids,
+            "privacy_ids": privacy_ids,
+            "authority_ids": authority_ids,
+            "slot_ids": slot_ids,
+            "has_write": has_write,
+            "memory_value_tokens": memory_value_tokens,
+        }
+
 
 def collate_traces(batch: Sequence[EncodedTrace]) -> dict[str, torch.Tensor]:
     max_action_len = max(len(item.action_tokens) for item in batch)
     max_write_len = max(len(item.write_tokens) for item in batch)
     max_value_len = max(len(item.memory_value_tokens) for item in batch)
+    max_events = max(len(item.event_tokens) for item in batch)
+    max_event_len = max(len(tokens) for item in batch for tokens in item.event_tokens)
+    max_event_value_len = max(
+        len(tokens) for item in batch for tokens in item.event_memory_value_tokens
+    )
     tokens = torch.zeros((len(batch), max_action_len), dtype=torch.long)
     write_tokens = torch.zeros((len(batch), max_write_len), dtype=torch.long)
     memory_value_tokens = torch.zeros((len(batch), max_value_len), dtype=torch.long)
     memory_value_mask = torch.zeros((len(batch), max_value_len), dtype=torch.bool)
+    event_tokens = torch.zeros((len(batch), max_events, max_event_len), dtype=torch.long)
+    event_lengths = torch.zeros((len(batch), max_events), dtype=torch.long)
+    event_mask = torch.zeros((len(batch), max_events), dtype=torch.bool)
+    event_value_tokens = torch.zeros(
+        (len(batch), max_events, max_event_value_len), dtype=torch.long
+    )
+    event_value_mask = torch.zeros((len(batch), max_events, max_event_value_len), dtype=torch.bool)
     for i, item in enumerate(batch):
         tokens[i, : len(item.action_tokens)] = torch.tensor(item.action_tokens, dtype=torch.long)
         write_tokens[i, : len(item.write_tokens)] = torch.tensor(
@@ -174,6 +255,15 @@ def collate_traces(batch: Sequence[EncodedTrace]) -> dict[str, torch.Tensor]:
             item.memory_value_tokens, dtype=torch.long
         )
         memory_value_mask[i, : len(item.memory_value_tokens)] = True
+        for j, event in enumerate(item.event_tokens):
+            event_tokens[i, j, : len(event)] = torch.tensor(event, dtype=torch.long)
+            event_lengths[i, j] = len(event)
+            event_mask[i, j] = True
+            value_tokens = item.event_memory_value_tokens[j]
+            event_value_tokens[i, j, : len(value_tokens)] = torch.tensor(
+                value_tokens, dtype=torch.long
+            )
+            event_value_mask[i, j, : len(value_tokens)] = True
     return {
         "tokens": tokens,
         "lengths": torch.tensor([len(item.action_tokens) for item in batch], dtype=torch.long),
@@ -181,6 +271,18 @@ def collate_traces(batch: Sequence[EncodedTrace]) -> dict[str, torch.Tensor]:
         "write_lengths": torch.tensor([len(item.write_tokens) for item in batch], dtype=torch.long),
         "memory_value_tokens": memory_value_tokens,
         "memory_value_mask": memory_value_mask,
+        "event_tokens": event_tokens,
+        "event_lengths": event_lengths,
+        "event_mask": event_mask,
+        "event_value_tokens": event_value_tokens,
+        "event_value_mask": event_value_mask,
+        "event_op_ids": _pad_event_labels(batch, "event_op_ids", max_events),
+        "event_type_ids": _pad_event_labels(batch, "event_type_ids", max_events),
+        "event_scope_ids": _pad_event_labels(batch, "event_scope_ids", max_events),
+        "event_privacy_ids": _pad_event_labels(batch, "event_privacy_ids", max_events),
+        "event_authority_ids": _pad_event_labels(batch, "event_authority_ids", max_events),
+        "event_slot_ids": _pad_event_labels(batch, "event_slot_ids", max_events),
+        "event_has_write": _pad_event_bools(batch, "event_has_write", max_events),
         "current_scope_ids": torch.tensor(
             [item.current_scope_id for item in batch], dtype=torch.long
         ),
@@ -192,3 +294,19 @@ def collate_traces(batch: Sequence[EncodedTrace]) -> dict[str, torch.Tensor]:
         "authority_ids": torch.tensor([item.authority_id for item in batch], dtype=torch.long),
         "slot_ids": torch.tensor([item.slot_id for item in batch], dtype=torch.long),
     }
+
+
+def _pad_event_labels(batch: Sequence[EncodedTrace], attr: str, max_events: int) -> torch.Tensor:
+    labels = torch.zeros((len(batch), max_events), dtype=torch.long)
+    for i, item in enumerate(batch):
+        values = getattr(item, attr)
+        labels[i, : len(values)] = torch.tensor(values, dtype=torch.long)
+    return labels
+
+
+def _pad_event_bools(batch: Sequence[EncodedTrace], attr: str, max_events: int) -> torch.Tensor:
+    labels = torch.zeros((len(batch), max_events), dtype=torch.bool)
+    for i, item in enumerate(batch):
+        values = getattr(item, attr)
+        labels[i, : len(values)] = torch.tensor(values, dtype=torch.bool)
+    return labels

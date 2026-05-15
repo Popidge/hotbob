@@ -10,6 +10,7 @@ from torch.nn import functional as F
 from torch.utils.data import DataLoader
 
 from hotbob.data.traces import read_jsonl
+from hotbob.model import MemoryBank
 from hotbob.model.stateful_transformer import StatefulTransformer
 from hotbob.training.dataset import (
     AUTHORITY_TO_ID,
@@ -77,39 +78,55 @@ def main() -> None:
             d_model=d_model,
             device=device,
         )
-        empty_memory = build_teacher_forced_memory(
-            model_embed=model.transformer.embed,
-            memory_value_tokens=batch["memory_value_tokens"],
-            memory_value_mask=batch["memory_value_mask"],
-            slot_ids=batch["slot_ids"],
-            type_ids=batch["type_ids"],
-            scope_ids=batch["scope_ids"],
-            privacy_ids=batch["privacy_ids"],
-            authority_ids=batch["authority_ids"],
-            num_memory_slots=num_memory_slots,
-            d_model=d_model,
-            device=device,
-        )
-        empty_memory.occupied.zero_()
-        empty_memory.strength.zero_()
-
-        prewrite_outputs = model(
-            batch["write_tokens"], empty_memory, batch["scope_ids"], batch["write_lengths"]
+        flat_event_tokens = batch["event_tokens"].flatten(0, 1)
+        flat_event_lengths = batch["event_lengths"].flatten(0, 1)
+        flat_event_mask = batch["event_mask"].flatten(0, 1)
+        flat_event_scope_ids = batch["event_scope_ids"].flatten(0, 1)
+        event_memory = MemoryBank(num_slots=num_memory_slots, d_model=d_model, device=device)
+        event_memory.reset(flat_event_tokens.shape[0])
+        event_outputs = model(
+            flat_event_tokens,
+            event_memory,
+            flat_event_scope_ids,
+            flat_event_lengths.clamp_min(1),
         )
         outputs = model(batch["tokens"], memory, batch["current_scope_ids"], batch["lengths"])
         loss = ce(outputs["action_logits"], batch["action_ids"])
-        loss = loss + ce(prewrite_outputs["op_logits"], batch["op_ids"])
-        loss = loss + ce(prewrite_outputs["slot_logits"], batch["slot_ids"])
-        loss = loss + ce(prewrite_outputs["type_logits"], batch["type_ids"])
-        loss = loss + ce(prewrite_outputs["scope_logits"], batch["scope_ids"])
-        loss = loss + ce(prewrite_outputs["privacy_logits"], batch["privacy_ids"])
-        loss = loss + ce(prewrite_outputs["authority_logits"], batch["authority_ids"])
-        target_value = mean_value_embedding(
-            model.transformer.embed,
-            batch["memory_value_tokens"],
-            batch["memory_value_mask"],
-        ).detach()
-        loss = loss + F.mse_loss(prewrite_outputs["value_vector"], target_value)
+        loss = loss + ce(
+            event_outputs["op_logits"][flat_event_mask],
+            batch["event_op_ids"].flatten(0, 1)[flat_event_mask],
+        )
+        flat_write_mask = batch["event_has_write"].flatten(0, 1) & flat_event_mask
+        if bool(flat_write_mask.any().item()):
+            loss = loss + ce(
+                event_outputs["slot_logits"][flat_write_mask],
+                batch["event_slot_ids"].flatten(0, 1)[flat_write_mask],
+            )
+            loss = loss + ce(
+                event_outputs["type_logits"][flat_write_mask],
+                batch["event_type_ids"].flatten(0, 1)[flat_write_mask],
+            )
+            loss = loss + ce(
+                event_outputs["scope_logits"][flat_write_mask],
+                batch["event_scope_ids"].flatten(0, 1)[flat_write_mask],
+            )
+            loss = loss + ce(
+                event_outputs["privacy_logits"][flat_write_mask],
+                batch["event_privacy_ids"].flatten(0, 1)[flat_write_mask],
+            )
+            loss = loss + ce(
+                event_outputs["authority_logits"][flat_write_mask],
+                batch["event_authority_ids"].flatten(0, 1)[flat_write_mask],
+            )
+        if bool(flat_write_mask.any().item()):
+            flat_event_value_tokens = batch["event_value_tokens"].flatten(0, 1)
+            flat_event_value_mask = batch["event_value_mask"].flatten(0, 1)
+            target_value = mean_value_embedding(
+                model.transformer.embed,
+                flat_event_value_tokens[flat_write_mask],
+                flat_event_value_mask[flat_write_mask],
+            ).detach()
+            loss = loss + F.mse_loss(event_outputs["value_vector"][flat_write_mask], target_value)
         read_attn = outputs["read_attention"][
             torch.arange(batch["tokens"].shape[0], device=device),
             outputs["boundary_indices"],
