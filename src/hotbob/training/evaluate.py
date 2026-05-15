@@ -111,7 +111,7 @@ def evaluate_neural(
             )
             empty_memory.reset(batch["tokens"].shape[0])
             prewrite_outputs = model(
-                batch["tokens"], empty_memory, batch["current_scope_ids"], batch["lengths"]
+                batch["write_tokens"], empty_memory, batch["scope_ids"], batch["write_lengths"]
             )
             write_targets = {
                 "op": ("op_logits", "op_ids"),

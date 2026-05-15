@@ -76,21 +76,39 @@ def main() -> None:
             d_model=d_model,
             device=device,
         )
+        empty_memory = build_teacher_forced_memory(
+            model_embed=model.transformer.embed,
+            memory_value_tokens=batch["memory_value_tokens"],
+            memory_value_mask=batch["memory_value_mask"],
+            slot_ids=batch["slot_ids"],
+            type_ids=batch["type_ids"],
+            scope_ids=batch["scope_ids"],
+            privacy_ids=batch["privacy_ids"],
+            authority_ids=batch["authority_ids"],
+            num_memory_slots=num_memory_slots,
+            d_model=d_model,
+            device=device,
+        )
+        empty_memory.occupied.zero_()
+        empty_memory.strength.zero_()
 
+        prewrite_outputs = model(
+            batch["write_tokens"], empty_memory, batch["scope_ids"], batch["write_lengths"]
+        )
         outputs = model(batch["tokens"], memory, batch["current_scope_ids"], batch["lengths"])
         loss = ce(outputs["action_logits"], batch["action_ids"])
-        loss = loss + ce(outputs["op_logits"], batch["op_ids"])
-        loss = loss + ce(outputs["slot_logits"], batch["slot_ids"])
-        loss = loss + ce(outputs["type_logits"], batch["type_ids"])
-        loss = loss + ce(outputs["scope_logits"], batch["scope_ids"])
-        loss = loss + ce(outputs["privacy_logits"], batch["privacy_ids"])
-        loss = loss + ce(outputs["authority_logits"], batch["authority_ids"])
+        loss = loss + ce(prewrite_outputs["op_logits"], batch["op_ids"])
+        loss = loss + ce(prewrite_outputs["slot_logits"], batch["slot_ids"])
+        loss = loss + ce(prewrite_outputs["type_logits"], batch["type_ids"])
+        loss = loss + ce(prewrite_outputs["scope_logits"], batch["scope_ids"])
+        loss = loss + ce(prewrite_outputs["privacy_logits"], batch["privacy_ids"])
+        loss = loss + ce(prewrite_outputs["authority_logits"], batch["authority_ids"])
         target_value = mean_value_embedding(
             model.transformer.embed,
             batch["memory_value_tokens"],
             batch["memory_value_mask"],
         ).detach()
-        loss = loss + F.mse_loss(outputs["value_vector"], target_value)
+        loss = loss + F.mse_loss(prewrite_outputs["value_vector"], target_value)
 
         optimizer.zero_grad()
         loss.backward()
