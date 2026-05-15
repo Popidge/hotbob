@@ -49,6 +49,8 @@ class EvalResult:
     boundary_fp: int = 0
     boundary_fn: int = 0
     boundary_tn: int = 0
+    read_target_mass_sum: float = 0.0
+    read_target_mass_count: int = 0
 
 
 def boundary_scores(result: EvalResult | None) -> tuple[str, str, str]:
@@ -76,6 +78,19 @@ def update_boundary_counts(
         counts["fn"] += 1
     else:
         counts["tn"] += 1
+
+
+def read_target_mass(result: EvalResult | None) -> str:
+    if result is None or result.read_target_mass_count == 0:
+        return "n/a"
+    return f"{result.read_target_mass_sum / result.read_target_mass_count:.3f}"
+
+
+def relevant_slot_index(trace: TaskTrace) -> int:
+    for idx, op in enumerate(trace.expected_memory_ops):
+        if op.scope == trace.current_scope:
+            return idx
+    return 0
 
 
 def evaluate_symbolic(traces) -> tuple[Counter[str], Counter[str], tuple[int, int, int]]:
@@ -168,6 +183,8 @@ def evaluate_neural(
     write_totals: Counter[str] = Counter()
     write_correct: Counter[str] = Counter()
     boundary_counts: Counter[str] = Counter()
+    read_target_mass_sum = 0.0
+    read_target_mass_count = 0
     offset = 0
     with torch.no_grad():
         for batch in loader:
@@ -230,6 +247,13 @@ def evaluate_neural(
             else:
                 memory = empty_memory
             outputs = model(batch["tokens"], memory, batch["current_scope_ids"], batch["lengths"])
+            target_read_mass = outputs["read_attention"][
+                torch.arange(batch["tokens"].shape[0], device=device),
+                outputs["boundary_indices"],
+                batch["slot_ids"],
+            ]
+            read_target_mass_sum += float(target_read_mass.sum().cpu().item())
+            read_target_mass_count += int(target_read_mass.numel())
             pred_ids = outputs["action_logits"].argmax(dim=-1).cpu().tolist()
             target_ids = batch["action_ids"].cpu().tolist()
             for row, (pred_id, target_id) in enumerate(zip(pred_ids, target_ids, strict=True)):
@@ -258,6 +282,8 @@ def evaluate_neural(
         boundary_fp=boundary_counts["fp"],
         boundary_fn=boundary_counts["fn"],
         boundary_tn=boundary_counts["tn"],
+        read_target_mass_sum=read_target_mass_sum,
+        read_target_mass_count=read_target_mass_count,
     )
 
 
@@ -394,6 +420,8 @@ def evaluate_sequential_neural(
     write_totals: Counter[str] = Counter()
     write_correct: Counter[str] = Counter()
     boundary_counts: Counter[str] = Counter()
+    read_target_mass_sum = 0.0
+    read_target_mass_count = 0
     with torch.no_grad():
         for trace in traces:
             memory = MemoryBank(
@@ -464,6 +492,13 @@ def evaluate_sequential_neural(
                 [dataset.scope_vocab[trace.current_scope]], dtype=torch.long, device=device
             )
             outputs = model(final_tokens, memory, current_scope, final_lengths)
+            slot_idx = min(relevant_slot_index(trace), memory.num_slots - 1)
+            read_target_mass_sum += float(
+                outputs["read_attention"][0, int(outputs["boundary_indices"][0].item()), slot_idx]
+                .cpu()
+                .item()
+            )
+            read_target_mass_count += 1
             pred = ID_TO_ACTION[int(outputs["action_logits"].argmax(dim=-1)[0].item())]
             target = trace.expected_final_action
             totals[trace.task_family] += 1
@@ -487,6 +522,8 @@ def evaluate_sequential_neural(
         boundary_fp=boundary_counts["fp"],
         boundary_fn=boundary_counts["fn"],
         boundary_tn=boundary_counts["tn"],
+        read_target_mass_sum=read_target_mass_sum,
+        read_target_mass_count=read_target_mass_count,
     )
 
 
@@ -639,9 +676,21 @@ def main() -> None:
     ]:
         precision, recall, f1 = boundary_scores(result)
         boundary_table.add_row(name, precision, recall, f1)
+    retrieval_table = Table(title="Memory retrieval metrics")
+    retrieval_table.add_column("Mode")
+    retrieval_table.add_column("Target-slot read mass")
+    for name, result in [
+        ("context-only prewrite", context_result),
+        ("teacher-forced prewrite", neural_result),
+        ("predicted-write prewrite", predicted_result),
+        ("sequential teacher-forced", sequential_tf_result),
+        ("sequential predicted", sequential_predicted_result),
+    ]:
+        retrieval_table.add_row(name, read_target_mass(result))
     Console().print(table)
     Console().print(memory_table)
     Console().print(boundary_table)
+    Console().print(retrieval_table)
 
 
 if __name__ == "__main__":

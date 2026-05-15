@@ -41,3 +41,4 @@ def test_evaluate_loads_checkpoint(tmp_path, monkeypatch, capsys) -> None:
     assert "sequential predicted" in output
     assert "Memory write metrics" in output
     assert "Boundary write decision metrics" in output
+    assert "Memory retrieval metrics" in output
