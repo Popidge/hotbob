@@ -11,6 +11,7 @@ from rich.table import Table
 from torch.utils.data import DataLoader
 
 from hotbob.baselines import SymbolicMemoryBaseline
+from hotbob.data.hygiene import is_memory_required_trace
 from hotbob.data.traces import read_jsonl
 from hotbob.model import MemoryBank
 from hotbob.model.stateful_transformer import StatefulTransformer
@@ -33,6 +34,8 @@ ID_TO_ACTION = {idx: label for label, idx in ACTION_TO_ID.items()}
 class EvalResult:
     totals: Counter[str]
     correct: Counter[str]
+    memory_required_total: int
+    memory_required_correct: int
     failures: tuple[int, int, int]
     write_accuracies: dict[str, float]
 
@@ -41,13 +44,24 @@ def evaluate_symbolic(traces) -> tuple[Counter[str], Counter[str], tuple[int, in
     baseline = SymbolicMemoryBaseline()
     totals: Counter[str] = Counter()
     correct: Counter[str] = Counter()
+    memory_required_total = 0
+    memory_required_correct = 0
     predictions: list[tuple[str, ActionLabel, ActionLabel]] = []
     for trace in traces:
         pred = baseline.predict(trace)
         totals[trace.task_family] += 1
         correct[trace.task_family] += int(pred == trace.expected_final_action)
+        if is_memory_required_trace(trace):
+            memory_required_total += 1
+            memory_required_correct += int(pred == trace.expected_final_action)
         predictions.append((trace.task_family, pred, trace.expected_final_action))
-    return totals, correct, failure_counts(predictions)
+    return (
+        totals,
+        correct,
+        memory_required_total,
+        memory_required_correct,
+        failure_counts(predictions),
+    )
 
 
 def failure_counts(predictions: list[tuple[str, ActionLabel, ActionLabel]]) -> tuple[int, int, int]:
@@ -62,6 +76,12 @@ def failure_counts(predictions: list[tuple[str, ActionLabel, ActionLabel]]) -> t
         if family == "expiry":
             expiry += int(pred != ActionLabel.IGNORE_EXPIRED_ORDER)
     return secret_leaks, wrong_scope, expiry
+
+
+def memory_required_accuracy(result: EvalResult | None) -> str:
+    if result is None or result.memory_required_total == 0:
+        return "n/a"
+    return f"{result.memory_required_correct / result.memory_required_total:.3f}"
 
 
 def evaluate_neural(
@@ -98,6 +118,8 @@ def evaluate_neural(
     loader = DataLoader(dataset, batch_size=batch_size, collate_fn=collate_traces)
     totals: Counter[str] = Counter()
     correct: Counter[str] = Counter()
+    memory_required_total = 0
+    memory_required_correct = 0
     predictions: list[tuple[str, ActionLabel, ActionLabel]] = []
     write_totals: Counter[str] = Counter()
     write_correct: Counter[str] = Counter()
@@ -161,11 +183,16 @@ def evaluate_neural(
                 target = ID_TO_ACTION[target_id]
                 totals[trace.task_family] += 1
                 correct[trace.task_family] += int(pred == target)
+                if is_memory_required_trace(trace):
+                    memory_required_total += 1
+                    memory_required_correct += int(pred == target)
                 predictions.append((trace.task_family, pred, target))
             offset += len(pred_ids)
     return EvalResult(
         totals=totals,
         correct=correct,
+        memory_required_total=memory_required_total,
+        memory_required_correct=memory_required_correct,
         failures=failure_counts(predictions),
         write_accuracies={
             name: write_correct[name] / write_totals[name]
@@ -183,7 +210,13 @@ def main() -> None:
     args = parser.parse_args()
     traces = read_jsonl(args.traces)
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    symbolic_totals, symbolic_correct, symbolic_failures = evaluate_symbolic(traces)
+    (
+        symbolic_totals,
+        symbolic_correct,
+        symbolic_memory_total,
+        symbolic_memory_correct,
+        symbolic_failures,
+    ) = evaluate_symbolic(traces)
     context_result = evaluate_neural(
         args.checkpoint,
         traces,
@@ -259,6 +292,13 @@ def main() -> None:
         str(context_failures[2]),
         str(neural_failures[2]),
         str(predicted_failures[2]),
+    )
+    table.add_row(
+        "memory-required aggregate",
+        f"{symbolic_memory_correct / symbolic_memory_total:.3f}",
+        memory_required_accuracy(context_result),
+        memory_required_accuracy(neural_result),
+        memory_required_accuracy(predicted_result),
     )
     memory_table = Table(title="Memory write metrics")
     memory_table.add_column("Mode")

@@ -60,6 +60,15 @@ class SymbolicMemoryBaseline:
                 for s in active
             ):
                 return ActionLabel.REFUSE_TO_REVEAL_SECRET
+        if "reveal the secret" in last:
+            return ActionLabel.REFUSE_TO_REVEAL_SECRET
+        if trace.task_family == "hidden_colour" and "make a guess" in last:
+            secret = next((s for s in active if s.key == "secret_colour"), None)
+            return (
+                ActionLabel.ANSWER_CORRECT
+                if secret and trace.metadata.get("guess_colour") == secret.value
+                else ActionLabel.ANSWER_NO
+            )
         if "i guess" in last:
             secret = next((s for s in active if s.key == "secret_colour"), None)
             return (
@@ -69,7 +78,17 @@ class SymbolicMemoryBaseline:
             )
         if "final result bug" in last:
             return ActionLabel.INSPECT_FUNCTION_DAVE
+        if trace.task_family == "symbol_binding" and "remembered target" in last:
+            binding = next((s for s in active if s.key == "remembered_target"), None)
+            if binding and binding.value == "calculate_final_score":
+                return ActionLabel.INSPECT_FUNCTION_CALCULATE_FINAL_SCORE
+            return ActionLabel.INSPECT_FUNCTION_DAVE
         if "inspect final scoring function" in last:
+            binding = next((s for s in active if s.key == "dave"), None)
+            if binding and binding.value == "final_scoring_function":
+                return ActionLabel.INSPECT_FUNCTION_DAVE
+            return ActionLabel.INSPECT_FUNCTION_CALCULATE_FINAL_SCORE
+        if trace.task_family == "scope_isolation" and "scoped target" in last:
             binding = next((s for s in active if s.key == "dave"), None)
             if binding and binding.value == "final_scoring_function":
                 return ActionLabel.INSPECT_FUNCTION_DAVE

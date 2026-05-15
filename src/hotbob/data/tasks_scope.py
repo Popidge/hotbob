@@ -30,7 +30,7 @@ def make_scope_isolation_trace(rng: random.Random, idx: int) -> TaskTrace:
                 role="USER", content="In REPO_B, dave = database migration script.", scope="repo_b"
             ),
             TraceEvent(role="CURRENT_SCOPE", content=current.upper(), scope=current),
-            TraceEvent(role="USER", content="inspect final scoring function", scope=current),
+            TraceEvent(role="USER", content="Inspect the scoped target.", scope=current),
         ],
         expected_memory_ops=[
             MemoryOp(
@@ -55,5 +55,5 @@ def make_scope_isolation_trace(rng: random.Random, idx: int) -> TaskTrace:
         expected_final_action=target,
         current_scope=current,
         task_family="scope_isolation",
-        metadata={},
+        metadata={"memory_required": True, "final_event_hides_memory_value": True},
     )

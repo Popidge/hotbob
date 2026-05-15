@@ -52,5 +52,9 @@ def make_expiry_trace(rng: random.Random, idx: int) -> TaskTrace:
         expected_final_action=ActionLabel.IGNORE_EXPIRED_ORDER,
         current_scope=new_scope,
         task_family="expiry",
-        metadata={"expired_scope": old_scope},
+        metadata={
+            "expired_scope": old_scope,
+            "memory_required": True,
+            "final_event_hides_memory_value": True,
+        },
     )

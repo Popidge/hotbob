@@ -46,5 +46,9 @@ def make_standing_order_trace(rng: random.Random, idx: int) -> TaskTrace:
         expected_final_action=action,
         current_scope=scope,
         task_family="standing_order",
-        metadata={"civilians_at_risk": civilians},
+        metadata={
+            "civilians_at_risk": civilians,
+            "memory_required": True,
+            "final_event_hides_memory_value": True,
+        },
     )
