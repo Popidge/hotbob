@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
 
 import torch
@@ -22,10 +23,18 @@ from hotbob.training.dataset import (
     TraceVocab,
     collate_traces,
 )
-from hotbob.training.memory_teacher import build_teacher_forced_memory
+from hotbob.training.memory_teacher import build_predicted_memory, build_teacher_forced_memory
 from hotbob.types import ActionLabel
 
 ID_TO_ACTION = {idx: label for label, idx in ACTION_TO_ID.items()}
+
+
+@dataclass(frozen=True)
+class EvalResult:
+    totals: Counter[str]
+    correct: Counter[str]
+    failures: tuple[int, int, int]
+    memory_op_accuracy: float | None = None
 
 
 def evaluate_symbolic(traces) -> tuple[Counter[str], Counter[str], tuple[int, int, int]]:
@@ -61,8 +70,8 @@ def evaluate_neural(
     batch_size: int,
     device: str,
     *,
-    teacher_force_memory: bool,
-) -> tuple[Counter[str], Counter[str], tuple[int, int, int]] | None:
+    memory_mode: str,
+) -> EvalResult | None:
     if not Path(checkpoint_path).exists():
         return None
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
@@ -89,11 +98,25 @@ def evaluate_neural(
     totals: Counter[str] = Counter()
     correct: Counter[str] = Counter()
     predictions: list[tuple[str, ActionLabel, ActionLabel]] = []
+    op_total = 0
+    op_correct = 0
     offset = 0
     with torch.no_grad():
         for batch in loader:
             batch = {key: value.to(device) for key, value in batch.items()}
-            if teacher_force_memory:
+            empty_memory = MemoryBank(
+                num_slots=config["num_memory_slots"],
+                d_model=config["d_model"],
+                device=device,
+            )
+            empty_memory.reset(batch["tokens"].shape[0])
+            prewrite_outputs = model(batch["tokens"], empty_memory, batch["current_scope_ids"])
+            op_total += batch["op_ids"].numel()
+            op_correct += int(
+                (prewrite_outputs["op_logits"].argmax(dim=-1) == batch["op_ids"]).sum().item()
+            )
+
+            if memory_mode == "teacher_forced":
                 memory = build_teacher_forced_memory(
                     model_embed=model.transformer.embed,
                     tokens=batch["tokens"],
@@ -106,13 +129,16 @@ def evaluate_neural(
                     d_model=config["d_model"],
                     device=device,
                 )
-            else:
-                memory = MemoryBank(
-                    num_slots=config["num_memory_slots"],
+            elif memory_mode == "predicted":
+                memory = build_predicted_memory(
+                    outputs=prewrite_outputs,
+                    batch_size=batch["tokens"].shape[0],
+                    num_memory_slots=config["num_memory_slots"],
                     d_model=config["d_model"],
                     device=device,
                 )
-                memory.reset(batch["tokens"].shape[0])
+            else:
+                memory = empty_memory
             outputs = model(batch["tokens"], memory, batch["current_scope_ids"])
             pred_ids = outputs["action_logits"].argmax(dim=-1).cpu().tolist()
             target_ids = batch["action_ids"].cpu().tolist()
@@ -124,7 +150,12 @@ def evaluate_neural(
                 correct[trace.task_family] += int(pred == target)
                 predictions.append((trace.task_family, pred, target))
             offset += len(pred_ids)
-    return totals, correct, failure_counts(predictions)
+    return EvalResult(
+        totals=totals,
+        correct=correct,
+        failures=failure_counts(predictions),
+        memory_op_accuracy=op_correct / op_total if op_total else None,
+    )
 
 
 def main() -> None:
@@ -141,14 +172,21 @@ def main() -> None:
         traces,
         args.batch_size,
         device,
-        teacher_force_memory=False,
+        memory_mode="context_only",
     )
     neural_result = evaluate_neural(
         args.checkpoint,
         traces,
         args.batch_size,
         device,
-        teacher_force_memory=True,
+        memory_mode="teacher_forced",
+    )
+    predicted_result = evaluate_neural(
+        args.checkpoint,
+        traces,
+        args.batch_size,
+        device,
+        memory_mode="predicted",
     )
 
     table = Table(title=f"HotBob evaluation ({args.checkpoint})")
@@ -156,43 +194,67 @@ def main() -> None:
     table.add_column("Symbolic accuracy")
     table.add_column("Context-only accuracy")
     table.add_column("Neural TF memory accuracy")
+    table.add_column("Predicted-write accuracy")
     all_families = sorted(symbolic_totals)
     for family in all_families:
         context_cell = "n/a"
         neural_cell = "n/a"
         if context_result is not None:
-            context_totals, context_correct, _ = context_result
-            context_cell = f"{context_correct[family] / context_totals[family]:.3f}"
+            context_cell = f"{context_result.correct[family] / context_result.totals[family]:.3f}"
         if neural_result is not None:
-            neural_totals, neural_correct, _ = neural_result
-            neural_cell = f"{neural_correct[family] / neural_totals[family]:.3f}"
+            neural_cell = f"{neural_result.correct[family] / neural_result.totals[family]:.3f}"
+        predicted_cell = "n/a"
+        if predicted_result is not None:
+            predicted_cell = (
+                f"{predicted_result.correct[family] / predicted_result.totals[family]:.3f}"
+            )
         table.add_row(
             family,
             f"{symbolic_correct[family] / symbolic_totals[family]:.3f}",
             context_cell,
             neural_cell,
+            predicted_cell,
         )
-    context_failures = context_result[2] if context_result is not None else ("n/a", "n/a", "n/a")
-    neural_failures = neural_result[2] if neural_result is not None else ("n/a", "n/a", "n/a")
+    context_failures = (
+        context_result.failures if context_result is not None else ("n/a", "n/a", "n/a")
+    )
+    neural_failures = neural_result.failures if neural_result is not None else ("n/a", "n/a", "n/a")
+    predicted_failures = (
+        predicted_result.failures if predicted_result is not None else ("n/a", "n/a", "n/a")
+    )
     table.add_row(
         "secret leak failures",
         str(symbolic_failures[0]),
         str(context_failures[0]),
         str(neural_failures[0]),
+        str(predicted_failures[0]),
     )
     table.add_row(
         "wrong-scope retrieval failures",
         str(symbolic_failures[1]),
         str(context_failures[1]),
         str(neural_failures[1]),
+        str(predicted_failures[1]),
     )
     table.add_row(
         "expiry failures",
         str(symbolic_failures[2]),
         str(context_failures[2]),
         str(neural_failures[2]),
+        str(predicted_failures[2]),
     )
+    memory_table = Table(title="Memory write metrics")
+    memory_table.add_column("Mode")
+    memory_table.add_column("Op accuracy")
+    for name, result in [
+        ("context-only prewrite", context_result),
+        ("teacher-forced prewrite", neural_result),
+        ("predicted-write prewrite", predicted_result),
+    ]:
+        value = "n/a" if result is None else f"{result.memory_op_accuracy:.3f}"
+        memory_table.add_row(name, value)
     Console().print(table)
+    Console().print(memory_table)
 
 
 if __name__ == "__main__":
