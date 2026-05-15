@@ -110,7 +110,9 @@ def evaluate_neural(
                 device=device,
             )
             empty_memory.reset(batch["tokens"].shape[0])
-            prewrite_outputs = model(batch["tokens"], empty_memory, batch["current_scope_ids"])
+            prewrite_outputs = model(
+                batch["tokens"], empty_memory, batch["current_scope_ids"], batch["lengths"]
+            )
             op_total += batch["op_ids"].numel()
             op_correct += int(
                 (prewrite_outputs["op_logits"].argmax(dim=-1) == batch["op_ids"]).sum().item()
@@ -140,7 +142,7 @@ def evaluate_neural(
                 )
             else:
                 memory = empty_memory
-            outputs = model(batch["tokens"], memory, batch["current_scope_ids"])
+            outputs = model(batch["tokens"], memory, batch["current_scope_ids"], batch["lengths"])
             pred_ids = outputs["action_logits"].argmax(dim=-1).cpu().tolist()
             target_ids = batch["action_ids"].cpu().tolist()
             for row, (pred_id, target_id) in enumerate(zip(pred_ids, target_ids, strict=True)):

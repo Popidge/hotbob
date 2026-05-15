@@ -150,6 +150,7 @@ def collate_traces(batch: Sequence[EncodedTrace]) -> dict[str, torch.Tensor]:
         memory_value_mask[i, : len(item.memory_value_tokens)] = True
     return {
         "tokens": tokens,
+        "lengths": torch.tensor([len(item.tokens) for item in batch], dtype=torch.long),
         "memory_value_tokens": memory_value_tokens,
         "memory_value_mask": memory_value_mask,
         "current_scope_ids": torch.tensor(

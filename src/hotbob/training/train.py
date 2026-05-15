@@ -77,7 +77,7 @@ def main() -> None:
             device=device,
         )
 
-        outputs = model(batch["tokens"], memory, batch["current_scope_ids"])
+        outputs = model(batch["tokens"], memory, batch["current_scope_ids"], batch["lengths"])
         loss = ce(outputs["action_logits"], batch["action_ids"])
         loss = loss + ce(outputs["op_logits"], batch["op_ids"])
         loss = loss + ce(outputs["slot_logits"], batch["slot_ids"])

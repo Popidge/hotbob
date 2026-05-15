@@ -35,11 +35,19 @@ class StatefulTransformer(nn.Module):
         self.action_head = nn.Linear(d_model, action_vocab_size)
 
     def forward(
-        self, tokens: torch.Tensor, memory: MemoryBank, scope_ids: torch.Tensor
+        self,
+        tokens: torch.Tensor,
+        memory: MemoryBank,
+        scope_ids: torch.Tensor,
+        lengths: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
-        hidden = self.transformer(tokens)
+        padding_mask = tokens == 0
+        hidden = self.transformer(tokens, padding_mask=padding_mask)
         hidden, _ = self.memory_read(hidden, memory, scope_ids)
-        boundary_hidden = hidden[:, -1]
+        if lengths is None:
+            lengths = (~padding_mask).sum(dim=1)
+        last_indices = (lengths - 1).clamp_min(0)
+        boundary_hidden = hidden[torch.arange(hidden.shape[0], device=hidden.device), last_indices]
         outputs = self.memory_write(boundary_hidden)
         outputs["action_logits"] = self.action_head(boundary_hidden)
         return outputs

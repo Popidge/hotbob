@@ -10,8 +10,10 @@ class TinyTransformer(nn.Module):
     ) -> None:
         super().__init__()
         layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=n_heads, batch_first=True)
-        self.encoder = nn.TransformerEncoder(layer, num_layers=n_layers)
+        self.encoder = nn.TransformerEncoder(layer, num_layers=n_layers, enable_nested_tensor=False)
         self.embed = nn.Embedding(vocab_size, d_model)
 
-    def forward(self, tokens: torch.Tensor) -> torch.Tensor:
-        return self.encoder(self.embed(tokens))
+    def forward(
+        self, tokens: torch.Tensor, padding_mask: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        return self.encoder(self.embed(tokens), src_key_padding_mask=padding_mask)
