@@ -78,6 +78,7 @@ def build_scope_vocab(traces: Sequence[TaskTrace]) -> dict[str, int]:
 @dataclass(frozen=True)
 class EncodedTrace:
     tokens: list[int]
+    memory_value_tokens: list[int]
     current_scope_id: int
     action_id: int
     op_id: int
@@ -120,8 +121,10 @@ class TraceDataset(Dataset[EncodedTrace]):
             tokens.extend(tokenize_text(event.content))
         token_ids = self.vocab.encode(tokens)[-self.max_seq_len :]
         first_op = trace.expected_memory_ops[0]
+        memory_value_tokens = self.vocab.encode(tokenize_text(first_op.value))
         return EncodedTrace(
             tokens=token_ids,
+            memory_value_tokens=memory_value_tokens,
             current_scope_id=self.scope_vocab[trace.current_scope],
             action_id=ACTION_TO_ID[trace.expected_final_action],
             op_id=OP_TO_ID[first_op.op],
@@ -135,11 +138,20 @@ class TraceDataset(Dataset[EncodedTrace]):
 
 def collate_traces(batch: Sequence[EncodedTrace]) -> dict[str, torch.Tensor]:
     max_len = max(len(item.tokens) for item in batch)
+    max_value_len = max(len(item.memory_value_tokens) for item in batch)
     tokens = torch.zeros((len(batch), max_len), dtype=torch.long)
+    memory_value_tokens = torch.zeros((len(batch), max_value_len), dtype=torch.long)
+    memory_value_mask = torch.zeros((len(batch), max_value_len), dtype=torch.bool)
     for i, item in enumerate(batch):
         tokens[i, : len(item.tokens)] = torch.tensor(item.tokens, dtype=torch.long)
+        memory_value_tokens[i, : len(item.memory_value_tokens)] = torch.tensor(
+            item.memory_value_tokens, dtype=torch.long
+        )
+        memory_value_mask[i, : len(item.memory_value_tokens)] = True
     return {
         "tokens": tokens,
+        "memory_value_tokens": memory_value_tokens,
+        "memory_value_mask": memory_value_mask,
         "current_scope_ids": torch.tensor(
             [item.current_scope_id for item in batch], dtype=torch.long
         ),

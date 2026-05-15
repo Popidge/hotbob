@@ -119,7 +119,8 @@ def evaluate_neural(
             if memory_mode == "teacher_forced":
                 memory = build_teacher_forced_memory(
                     model_embed=model.transformer.embed,
-                    tokens=batch["tokens"],
+                    memory_value_tokens=batch["memory_value_tokens"],
+                    memory_value_mask=batch["memory_value_mask"],
                     slot_ids=batch["slot_ids"],
                     type_ids=batch["type_ids"],
                     scope_ids=batch["scope_ids"],

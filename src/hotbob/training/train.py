@@ -6,6 +6,7 @@ from pathlib import Path
 import torch
 from rich.progress import track
 from torch import nn
+from torch.nn import functional as F
 from torch.utils.data import DataLoader
 
 from hotbob.data.traces import read_jsonl
@@ -17,7 +18,7 @@ from hotbob.training.dataset import (
     TraceDataset,
     collate_traces,
 )
-from hotbob.training.memory_teacher import build_teacher_forced_memory
+from hotbob.training.memory_teacher import build_teacher_forced_memory, mean_value_embedding
 from hotbob.types import ActionLabel
 
 
@@ -64,7 +65,8 @@ def main() -> None:
         batch = {key: value.to(device) for key, value in batch.items()}
         memory = build_teacher_forced_memory(
             model_embed=model.transformer.embed,
-            tokens=batch["tokens"],
+            memory_value_tokens=batch["memory_value_tokens"],
+            memory_value_mask=batch["memory_value_mask"],
             slot_ids=batch["slot_ids"],
             type_ids=batch["type_ids"],
             scope_ids=batch["scope_ids"],
@@ -83,6 +85,12 @@ def main() -> None:
         loss = loss + ce(outputs["scope_logits"], batch["scope_ids"])
         loss = loss + ce(outputs["privacy_logits"], batch["privacy_ids"])
         loss = loss + ce(outputs["authority_logits"], batch["authority_ids"])
+        target_value = mean_value_embedding(
+            model.transformer.embed,
+            batch["memory_value_tokens"],
+            batch["memory_value_mask"],
+        ).detach()
+        loss = loss + F.mse_loss(outputs["value_vector"], target_value)
 
         optimizer.zero_grad()
         loss.backward()

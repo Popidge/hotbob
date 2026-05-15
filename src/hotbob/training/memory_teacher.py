@@ -5,10 +5,23 @@ import torch
 from hotbob.model import MemoryBank
 
 
+def mean_value_embedding(
+    model_embed: torch.nn.Embedding,
+    memory_value_tokens: torch.Tensor,
+    memory_value_mask: torch.Tensor,
+) -> torch.Tensor:
+    embedded = model_embed(memory_value_tokens)
+    mask = memory_value_mask.unsqueeze(-1)
+    summed = (embedded * mask).sum(dim=1)
+    counts = mask.sum(dim=1).clamp_min(1)
+    return summed / counts
+
+
 def build_teacher_forced_memory(
     *,
     model_embed: torch.nn.Embedding,
-    tokens: torch.Tensor,
+    memory_value_tokens: torch.Tensor,
+    memory_value_mask: torch.Tensor,
     slot_ids: torch.Tensor,
     type_ids: torch.Tensor,
     scope_ids: torch.Tensor,
@@ -21,13 +34,17 @@ def build_teacher_forced_memory(
     """Create a tensor memory bank from labelled memory ops without prompt text injection."""
 
     memory = MemoryBank(num_slots=num_memory_slots, d_model=d_model, device=device)
-    memory.reset(tokens.shape[0])
-    for row in range(tokens.shape[0]):
-        vector = model_embed(tokens[row, -1]).detach()
+    memory.reset(memory_value_tokens.shape[0])
+    value_vectors = mean_value_embedding(
+        model_embed,
+        memory_value_tokens,
+        memory_value_mask,
+    ).detach()
+    for row in range(memory_value_tokens.shape[0]):
         memory.apply_write(
             row,
             int(slot_ids[row].item()),
-            vector,
+            value_vectors[row],
             type_id=int(type_ids[row].item()),
             scope_id=int(scope_ids[row].item()),
             privacy_id=int(privacy_ids[row].item()),
