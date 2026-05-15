@@ -1,3 +1,4 @@
+from hotbob.data.generate import main as generate_main
 from hotbob.data.traces import generate_traces
 from hotbob.types import MemoryAuthority, MemoryPrivacy, MemoryType
 
@@ -19,3 +20,27 @@ def test_generation_covers_all_families_and_ops_are_typed() -> None:
             assert op.scope
             assert isinstance(op.authority, MemoryAuthority)
             assert isinstance(op.privacy, MemoryPrivacy)
+
+
+def test_generate_train_eval_split(tmp_path, monkeypatch) -> None:
+    train_out = tmp_path / "train.jsonl"
+    eval_out = tmp_path / "eval.jsonl"
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "generate",
+            "--train-out",
+            str(train_out),
+            "--eval-out",
+            str(eval_out),
+            "--train-n",
+            "10",
+            "--eval-n",
+            "7",
+            "--seed",
+            "1",
+        ],
+    )
+    generate_main()
+    assert train_out.read_text(encoding="utf-8").count("\n") == 10
+    assert eval_out.read_text(encoding="utf-8").count("\n") == 7

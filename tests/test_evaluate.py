@@ -40,3 +40,4 @@ def test_evaluate_loads_checkpoint(tmp_path, monkeypatch, capsys) -> None:
     assert "sequential teacher-forced" in output
     assert "sequential predicted" in output
     assert "Memory write metrics" in output
+    assert "Boundary write decision metrics" in output

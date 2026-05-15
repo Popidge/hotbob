@@ -45,6 +45,37 @@ class EvalResult:
     memory_required_correct: int
     failures: tuple[int, int, int]
     write_accuracies: dict[str, float]
+    boundary_tp: int = 0
+    boundary_fp: int = 0
+    boundary_fn: int = 0
+    boundary_tn: int = 0
+
+
+def boundary_scores(result: EvalResult | None) -> tuple[str, str, str]:
+    if result is None:
+        return "n/a", "n/a", "n/a"
+    precision_den = result.boundary_tp + result.boundary_fp
+    recall_den = result.boundary_tp + result.boundary_fn
+    precision = result.boundary_tp / precision_den if precision_den else 0.0
+    recall = result.boundary_tp / recall_den if recall_den else 0.0
+    f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
+    return f"{precision:.3f}", f"{recall:.3f}", f"{f1:.3f}"
+
+
+def update_boundary_counts(
+    *,
+    pred_is_write: bool,
+    target_is_write: bool,
+    counts: Counter[str],
+) -> None:
+    if pred_is_write and target_is_write:
+        counts["tp"] += 1
+    elif pred_is_write and not target_is_write:
+        counts["fp"] += 1
+    elif not pred_is_write and target_is_write:
+        counts["fn"] += 1
+    else:
+        counts["tn"] += 1
 
 
 def evaluate_symbolic(traces) -> tuple[Counter[str], Counter[str], tuple[int, int, int]]:
@@ -136,6 +167,7 @@ def evaluate_neural(
     predictions: list[tuple[str, ActionLabel, ActionLabel]] = []
     write_totals: Counter[str] = Counter()
     write_correct: Counter[str] = Counter()
+    boundary_counts: Counter[str] = Counter()
     offset = 0
     with torch.no_grad():
         for batch in loader:
@@ -161,6 +193,16 @@ def evaluate_neural(
                 write_totals[name] += batch[target_key].numel()
                 write_correct[name] += int(
                     (prewrite_outputs[logit_key].argmax(dim=-1) == batch[target_key]).sum().item()
+                )
+            predicted_write = (
+                prewrite_outputs["op_logits"].argmax(dim=-1) != OP_TO_ID[MemoryOpName.NOOP]
+            )
+            target_write = batch["op_ids"] != OP_TO_ID[MemoryOpName.NOOP]
+            for pred, target in zip(predicted_write.tolist(), target_write.tolist(), strict=True):
+                update_boundary_counts(
+                    pred_is_write=bool(pred),
+                    target_is_write=bool(target),
+                    counts=boundary_counts,
                 )
 
             if memory_mode == "teacher_forced":
@@ -212,6 +254,10 @@ def evaluate_neural(
             for name in sorted(write_totals)
             if write_totals[name]
         },
+        boundary_tp=boundary_counts["tp"],
+        boundary_fp=boundary_counts["fp"],
+        boundary_fn=boundary_counts["fn"],
+        boundary_tn=boundary_counts["tn"],
     )
 
 
@@ -347,6 +393,7 @@ def evaluate_sequential_neural(
     predictions: list[tuple[str, ActionLabel, ActionLabel]] = []
     write_totals: Counter[str] = Counter()
     write_correct: Counter[str] = Counter()
+    boundary_counts: Counter[str] = Counter()
     with torch.no_grad():
         for trace in traces:
             memory = MemoryBank(
@@ -366,26 +413,47 @@ def evaluate_sequential_neural(
                     dataset, event, trace.current_scope, device
                 )
                 outputs = model(event_tokens, memory, scope_id, event_lengths)
-                if op_index < len(trace.expected_memory_ops):
-                    target_op = trace.expected_memory_ops[op_index]
-                    if (event.scope or trace.current_scope) == target_op.scope:
-                        write_targets = {
-                            "op": ("op_logits", OP_TO_ID[target_op.op]),
-                            "slot": ("slot_logits", min(op_index, memory.num_slots - 1)),
-                            "type": ("type_logits", TYPE_TO_ID[target_op.type]),
-                            "scope": ("scope_logits", dataset.scope_vocab[target_op.scope]),
-                            "privacy": ("privacy_logits", PRIVACY_TO_ID[target_op.privacy]),
-                            "authority": ("authority_logits", AUTHORITY_TO_ID[target_op.authority]),
-                        }
-                        for name, (logit_key, target_id) in write_targets.items():
-                            write_totals[name] += 1
-                            pred_id = int(outputs[logit_key].argmax(dim=-1)[0].item())
-                            write_correct[name] += int(pred_id == target_id)
-                        if memory_mode == "teacher_forced":
-                            apply_teacher_op(memory, model, dataset, trace, op_index, device)
-                        elif memory_mode == "predicted":
-                            apply_predicted_op(memory, outputs)
-                        op_index += 1
+                target_op = (
+                    trace.expected_memory_ops[op_index]
+                    if op_index < len(trace.expected_memory_ops)
+                    else None
+                )
+                target_is_write = (
+                    target_op is not None
+                    and (event.scope or trace.current_scope) == target_op.scope
+                )
+                pred_op_id = int(outputs["op_logits"].argmax(dim=-1)[0].item())
+                update_boundary_counts(
+                    pred_is_write=ID_TO_OP[pred_op_id] != MemoryOpName.NOOP,
+                    target_is_write=target_is_write,
+                    counts=boundary_counts,
+                )
+                write_totals["op"] += 1
+                write_correct["op"] += int(
+                    pred_op_id
+                    == (
+                        OP_TO_ID[target_op.op]
+                        if target_is_write and target_op is not None
+                        else OP_TO_ID[MemoryOpName.NOOP]
+                    )
+                )
+                if target_is_write and target_op is not None:
+                    write_targets = {
+                        "slot": ("slot_logits", min(op_index, memory.num_slots - 1)),
+                        "type": ("type_logits", TYPE_TO_ID[target_op.type]),
+                        "scope": ("scope_logits", dataset.scope_vocab[target_op.scope]),
+                        "privacy": ("privacy_logits", PRIVACY_TO_ID[target_op.privacy]),
+                        "authority": ("authority_logits", AUTHORITY_TO_ID[target_op.authority]),
+                    }
+                    for name, (logit_key, target_id) in write_targets.items():
+                        write_totals[name] += 1
+                        pred_id = int(outputs[logit_key].argmax(dim=-1)[0].item())
+                        write_correct[name] += int(pred_id == target_id)
+                    if memory_mode == "teacher_forced":
+                        apply_teacher_op(memory, model, dataset, trace, op_index, device)
+                    elif memory_mode == "predicted":
+                        apply_predicted_op(memory, outputs)
+                    op_index += 1
                 elif memory_mode == "predicted":
                     apply_predicted_op(memory, outputs)
 
@@ -415,6 +483,10 @@ def evaluate_sequential_neural(
             for name in sorted(write_totals)
             if write_totals[name]
         },
+        boundary_tp=boundary_counts["tp"],
+        boundary_fp=boundary_counts["fp"],
+        boundary_fn=boundary_counts["fn"],
+        boundary_tn=boundary_counts["tn"],
     )
 
 
@@ -553,8 +625,23 @@ def main() -> None:
         else:
             for head, value in result.write_accuracies.items():
                 memory_table.add_row(name, head, f"{value:.3f}")
+    boundary_table = Table(title="Boundary write decision metrics")
+    boundary_table.add_column("Mode")
+    boundary_table.add_column("Precision")
+    boundary_table.add_column("Recall")
+    boundary_table.add_column("F1")
+    for name, result in [
+        ("context-only prewrite", context_result),
+        ("teacher-forced prewrite", neural_result),
+        ("predicted-write prewrite", predicted_result),
+        ("sequential teacher-forced", sequential_tf_result),
+        ("sequential predicted", sequential_predicted_result),
+    ]:
+        precision, recall, f1 = boundary_scores(result)
+        boundary_table.add_row(name, precision, recall, f1)
     Console().print(table)
     Console().print(memory_table)
+    Console().print(boundary_table)
 
 
 if __name__ == "__main__":
