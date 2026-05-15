@@ -34,7 +34,7 @@ class EvalResult:
     totals: Counter[str]
     correct: Counter[str]
     failures: tuple[int, int, int]
-    memory_op_accuracy: float | None = None
+    write_accuracies: dict[str, float]
 
 
 def evaluate_symbolic(traces) -> tuple[Counter[str], Counter[str], tuple[int, int, int]]:
@@ -98,8 +98,8 @@ def evaluate_neural(
     totals: Counter[str] = Counter()
     correct: Counter[str] = Counter()
     predictions: list[tuple[str, ActionLabel, ActionLabel]] = []
-    op_total = 0
-    op_correct = 0
+    write_totals: Counter[str] = Counter()
+    write_correct: Counter[str] = Counter()
     offset = 0
     with torch.no_grad():
         for batch in loader:
@@ -113,10 +113,19 @@ def evaluate_neural(
             prewrite_outputs = model(
                 batch["tokens"], empty_memory, batch["current_scope_ids"], batch["lengths"]
             )
-            op_total += batch["op_ids"].numel()
-            op_correct += int(
-                (prewrite_outputs["op_logits"].argmax(dim=-1) == batch["op_ids"]).sum().item()
-            )
+            write_targets = {
+                "op": ("op_logits", "op_ids"),
+                "slot": ("slot_logits", "slot_ids"),
+                "type": ("type_logits", "type_ids"),
+                "scope": ("scope_logits", "scope_ids"),
+                "privacy": ("privacy_logits", "privacy_ids"),
+                "authority": ("authority_logits", "authority_ids"),
+            }
+            for name, (logit_key, target_key) in write_targets.items():
+                write_totals[name] += batch[target_key].numel()
+                write_correct[name] += int(
+                    (prewrite_outputs[logit_key].argmax(dim=-1) == batch[target_key]).sum().item()
+                )
 
             if memory_mode == "teacher_forced":
                 memory = build_teacher_forced_memory(
@@ -157,7 +166,11 @@ def evaluate_neural(
         totals=totals,
         correct=correct,
         failures=failure_counts(predictions),
-        memory_op_accuracy=op_correct / op_total if op_total else None,
+        write_accuracies={
+            name: write_correct[name] / write_totals[name]
+            for name in sorted(write_totals)
+            if write_totals[name]
+        },
     )
 
 
@@ -248,14 +261,18 @@ def main() -> None:
     )
     memory_table = Table(title="Memory write metrics")
     memory_table.add_column("Mode")
-    memory_table.add_column("Op accuracy")
+    memory_table.add_column("Head")
+    memory_table.add_column("Accuracy")
     for name, result in [
         ("context-only prewrite", context_result),
         ("teacher-forced prewrite", neural_result),
         ("predicted-write prewrite", predicted_result),
     ]:
-        value = "n/a" if result is None else f"{result.memory_op_accuracy:.3f}"
-        memory_table.add_row(name, value)
+        if result is None:
+            memory_table.add_row(name, "all", "n/a")
+        else:
+            for head, value in result.write_accuracies.items():
+                memory_table.add_row(name, head, f"{value:.3f}")
     Console().print(table)
     Console().print(memory_table)
 
