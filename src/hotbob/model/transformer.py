@@ -1,0 +1,17 @@
+from __future__ import annotations
+
+import torch
+from torch import nn
+
+
+class TinyTransformer(nn.Module):
+    def __init__(
+        self, vocab_size: int, d_model: int = 128, n_heads: int = 4, n_layers: int = 2
+    ) -> None:
+        super().__init__()
+        layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=n_heads, batch_first=True)
+        self.encoder = nn.TransformerEncoder(layer, num_layers=n_layers)
+        self.embed = nn.Embedding(vocab_size, d_model)
+
+    def forward(self, tokens: torch.Tensor) -> torch.Tensor:
+        return self.encoder(self.embed(tokens))
