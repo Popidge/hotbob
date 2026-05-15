@@ -45,6 +45,15 @@ class TraceVocab:
     def __len__(self) -> int:
         return len(self.id_to_token)
 
+    @classmethod
+    def from_token_to_id(cls, token_to_id: dict[str, int]) -> TraceVocab:
+        vocab = cls()
+        vocab.token_to_id = dict(token_to_id)
+        vocab.id_to_token = [""] * len(token_to_id)
+        for token, idx in token_to_id.items():
+            vocab.id_to_token[idx] = token
+        return vocab
+
 
 def build_vocab(traces: Sequence[TaskTrace]) -> TraceVocab:
     vocab = TraceVocab()

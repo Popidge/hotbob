@@ -9,7 +9,6 @@ from torch import nn
 from torch.utils.data import DataLoader
 
 from hotbob.data.traces import read_jsonl
-from hotbob.model import MemoryBank
 from hotbob.model.stateful_transformer import StatefulTransformer
 from hotbob.training.dataset import (
     AUTHORITY_TO_ID,
@@ -18,6 +17,7 @@ from hotbob.training.dataset import (
     TraceDataset,
     collate_traces,
 )
+from hotbob.training.memory_teacher import build_teacher_forced_memory
 from hotbob.types import ActionLabel
 
 
@@ -62,21 +62,18 @@ def main() -> None:
             data_iter = iter(loader)
             batch = next(data_iter)
         batch = {key: value.to(device) for key, value in batch.items()}
-        memory = MemoryBank(num_slots=num_memory_slots, d_model=d_model, device=device)
-        memory.reset(batch["tokens"].shape[0])
-
-        # Teacher-forced prefill: make a non-text memory vector available in the correct scope.
-        for row in range(batch["tokens"].shape[0]):
-            vector = model.transformer.embed(batch["tokens"][row, -1]).detach()
-            memory.apply_write(
-                row,
-                int(batch["slot_ids"][row].item()),
-                vector,
-                type_id=int(batch["type_ids"][row].item()),
-                scope_id=int(batch["scope_ids"][row].item()),
-                privacy_id=int(batch["privacy_ids"][row].item()),
-                authority_id=int(batch["authority_ids"][row].item()),
-            )
+        memory = build_teacher_forced_memory(
+            model_embed=model.transformer.embed,
+            tokens=batch["tokens"],
+            slot_ids=batch["slot_ids"],
+            type_ids=batch["type_ids"],
+            scope_ids=batch["scope_ids"],
+            privacy_ids=batch["privacy_ids"],
+            authority_ids=batch["authority_ids"],
+            num_memory_slots=num_memory_slots,
+            d_model=d_model,
+            device=device,
+        )
 
         outputs = model(batch["tokens"], memory, batch["current_scope_ids"])
         loss = ce(outputs["action_logits"], batch["action_ids"])
