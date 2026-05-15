@@ -26,6 +26,27 @@ def tokenize_text(text: str) -> list[str]:
     return TOKEN_RE.findall(text.lower())
 
 
+def normalize_scope(scope: str) -> str:
+    """Map generated one-off scope ids to reusable scope classes."""
+
+    lower = scope.lower()
+    if lower.startswith("game_"):
+        return "game"
+    if lower.startswith("mission_") and lower.endswith("_old"):
+        return "mission_old"
+    if lower.startswith("mission_") and lower.endswith("_new"):
+        return "mission_new"
+    if lower.startswith("mission_"):
+        return "mission"
+    if lower.startswith("repo_") and lower.endswith("_a"):
+        return "repo_a"
+    if lower.startswith("repo_") and lower.endswith("_b"):
+        return "repo_b"
+    if lower.startswith("repo_"):
+        return "repo"
+    return lower
+
+
 class TraceVocab:
     def __init__(self, tokens: Sequence[str] = ()) -> None:
         self.token_to_id = {PAD: 0, UNK: 1}
@@ -60,7 +81,7 @@ def build_vocab(traces: Sequence[TaskTrace]) -> TraceVocab:
     for trace in traces:
         for event in trace.events:
             vocab.add(f"role_{event.role.lower()}")
-            vocab.add(f"scope_{(event.scope or trace.current_scope).lower()}")
+            vocab.add(f"scope_{normalize_scope(event.scope or trace.current_scope)}")
             for token in tokenize_text(event.content):
                 vocab.add(token)
     return vocab
@@ -68,9 +89,13 @@ def build_vocab(traces: Sequence[TaskTrace]) -> TraceVocab:
 
 def build_scope_vocab(traces: Sequence[TaskTrace]) -> dict[str, int]:
     scopes = sorted(
-        {event.scope or trace.current_scope for trace in traces for event in trace.events}
-        | {trace.current_scope for trace in traces}
-        | {op.scope for trace in traces for op in trace.expected_memory_ops}
+        {
+            normalize_scope(event.scope or trace.current_scope)
+            for trace in traces
+            for event in trace.events
+        }
+        | {normalize_scope(trace.current_scope) for trace in traces}
+        | {normalize_scope(op.scope) for trace in traces for op in trace.expected_memory_ops}
     )
     return {scope: idx + 1 for idx, scope in enumerate(scopes)}
 
@@ -151,11 +176,11 @@ class TraceDataset(Dataset[EncodedTrace]):
             event_has_write=event_targets["has_write"],
             event_memory_value_tokens=event_targets["memory_value_tokens"],
             memory_value_tokens=memory_value_tokens,
-            current_scope_id=self.scope_vocab.get(trace.current_scope, 0),
+            current_scope_id=self.scope_vocab.get(normalize_scope(trace.current_scope), 0),
             action_id=ACTION_TO_ID[trace.expected_final_action],
             op_id=OP_TO_ID[first_op.op],
             type_id=TYPE_TO_ID[first_op.type],
-            scope_id=self.scope_vocab.get(first_op.scope, 0),
+            scope_id=self.scope_vocab.get(normalize_scope(first_op.scope), 0),
             privacy_id=PRIVACY_TO_ID[first_op.privacy],
             authority_id=AUTHORITY_TO_ID[first_op.authority],
             slot_id=0,
@@ -164,7 +189,7 @@ class TraceDataset(Dataset[EncodedTrace]):
     def _encode_event(self, event, current_scope: str) -> list[int]:
         tokens = [
             f"role_{event.role.lower()}",
-            f"scope_{(event.scope or current_scope).lower()}",
+            f"scope_{normalize_scope(event.scope or current_scope)}",
             *tokenize_text(event.content),
         ]
         return self.vocab.encode(tokens)
@@ -197,7 +222,7 @@ class TraceDataset(Dataset[EncodedTrace]):
             if target_op is not None and (event.scope or trace.current_scope) == target_op.scope:
                 op_ids.append(OP_TO_ID[target_op.op])
                 type_ids.append(TYPE_TO_ID[target_op.type])
-                scope_ids.append(self.scope_vocab.get(target_op.scope, 0))
+                scope_ids.append(self.scope_vocab.get(normalize_scope(target_op.scope), 0))
                 privacy_ids.append(PRIVACY_TO_ID[target_op.privacy])
                 authority_ids.append(AUTHORITY_TO_ID[target_op.authority])
                 slot_ids.append(min(op_index, 31))
@@ -207,7 +232,9 @@ class TraceDataset(Dataset[EncodedTrace]):
             else:
                 op_ids.append(OP_TO_ID[MemoryOpName.NOOP])
                 type_ids.append(TYPE_TO_ID[default_op.type])
-                scope_ids.append(self.scope_vocab.get(event.scope or trace.current_scope, 0))
+                scope_ids.append(
+                    self.scope_vocab.get(normalize_scope(event.scope or trace.current_scope), 0)
+                )
                 privacy_ids.append(PRIVACY_TO_ID[default_op.privacy])
                 authority_ids.append(AUTHORITY_TO_ID[default_op.authority])
                 slot_ids.append(0)

@@ -24,6 +24,7 @@ from hotbob.training.dataset import (
     TraceDataset,
     TraceVocab,
     collate_traces,
+    normalize_scope,
     tokenize_text,
 )
 from hotbob.training.memory_teacher import (
@@ -356,7 +357,8 @@ def apply_teacher_op(
         for slot in range(memory.num_slots):
             if (
                 bool(memory.occupied[0, slot].item())
-                and int(memory.scope_ids[0, slot].item()) == dataset.scope_vocab.get(op.scope, -1)
+                and int(memory.scope_ids[0, slot].item())
+                == dataset.scope_vocab.get(normalize_scope(op.scope), -1)
                 and int(memory.type_ids[0, slot].item()) == TYPE_TO_ID[op.type]
             ):
                 memory.apply_delete(0, slot)
@@ -371,7 +373,7 @@ def apply_teacher_op(
         slot_idx,
         vector,
         type_id=TYPE_TO_ID[op.type],
-        scope_id=dataset.scope_vocab.get(op.scope, 0),
+        scope_id=dataset.scope_vocab.get(normalize_scope(op.scope), 0),
         privacy_id=PRIVACY_TO_ID[op.privacy],
         authority_id=AUTHORITY_TO_ID[op.authority],
     )
@@ -412,7 +414,7 @@ def apply_predicted_op(
     else:
         vector = outputs["value_vector"][0].detach()
     scope_id = (
-        dataset.scope_vocab.get(target_op.scope, 0)
+        dataset.scope_vocab.get(normalize_scope(target_op.scope), 0)
         if oracle_scope and dataset is not None and target_op is not None
         else int(outputs["scope_logits"].argmax(dim=-1)[0].item())
     )
@@ -469,7 +471,11 @@ def evaluate_sequential_neural(
             op_index = 0
             for event in trace.events[:-1]:
                 scope_id = torch.tensor(
-                    [dataset.scope_vocab.get(event.scope or trace.current_scope, 0)],
+                    [
+                        dataset.scope_vocab.get(
+                            normalize_scope(event.scope or trace.current_scope), 0
+                        )
+                    ],
                     dtype=torch.long,
                     device=device,
                 )
@@ -505,7 +511,10 @@ def evaluate_sequential_neural(
                     write_targets = {
                         "slot": ("slot_logits", min(op_index, memory.num_slots - 1)),
                         "type": ("type_logits", TYPE_TO_ID[target_op.type]),
-                        "scope": ("scope_logits", dataset.scope_vocab.get(target_op.scope, 0)),
+                        "scope": (
+                            "scope_logits",
+                            dataset.scope_vocab.get(normalize_scope(target_op.scope), 0),
+                        ),
                         "privacy": ("privacy_logits", PRIVACY_TO_ID[target_op.privacy]),
                         "authority": ("authority_logits", AUTHORITY_TO_ID[target_op.authority]),
                     }
@@ -536,7 +545,9 @@ def evaluate_sequential_neural(
                 dataset, trace.events[-1], trace.current_scope, device
             )
             current_scope = torch.tensor(
-                [dataset.scope_vocab.get(trace.current_scope, 0)], dtype=torch.long, device=device
+                [dataset.scope_vocab.get(normalize_scope(trace.current_scope), 0)],
+                dtype=torch.long,
+                device=device,
             )
             outputs = model(final_tokens, memory, current_scope, final_lengths)
             slot_idx = min(relevant_slot_index(trace), memory.num_slots - 1)
