@@ -44,11 +44,14 @@ class StatefulTransformer(nn.Module):
     ) -> dict[str, torch.Tensor]:
         padding_mask = tokens == 0
         hidden = self.transformer(tokens, padding_mask=padding_mask)
-        hidden, _ = self.memory_read(hidden, memory, scope_ids)
+        hidden, read_attention = self.memory_read(hidden, memory, scope_ids)
         if lengths is None:
             lengths = (~padding_mask).sum(dim=1)
         last_indices = (lengths - 1).clamp_min(0)
-        boundary_hidden = hidden[torch.arange(hidden.shape[0], device=hidden.device), last_indices]
+        batch_indices = torch.arange(hidden.shape[0], device=hidden.device)
+        boundary_hidden = hidden[batch_indices, last_indices]
         outputs = self.memory_write(boundary_hidden)
         outputs["action_logits"] = self.action_head(boundary_hidden)
+        outputs["read_attention"] = read_attention
+        outputs["boundary_indices"] = last_indices
         return outputs

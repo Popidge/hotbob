@@ -110,6 +110,12 @@ def main() -> None:
             batch["memory_value_mask"],
         ).detach()
         loss = loss + F.mse_loss(prewrite_outputs["value_vector"], target_value)
+        read_attn = outputs["read_attention"][
+            torch.arange(batch["tokens"].shape[0], device=device),
+            outputs["boundary_indices"],
+            batch["slot_ids"],
+        ]
+        loss = loss - 0.1 * torch.log(read_attn.clamp_min(1e-6)).mean()
 
         optimizer.zero_grad()
         loss.backward()
