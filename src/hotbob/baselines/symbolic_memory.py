@@ -89,14 +89,26 @@ class SymbolicMemoryBaseline:
                 return ActionLabel.INSPECT_FUNCTION_DAVE
             return ActionLabel.INSPECT_FUNCTION_CALCULATE_FINAL_SCORE
         if trace.task_family == "scope_isolation" and "scoped target" in last:
-            binding = next((s for s in active if s.key == "dave"), None)
-            if binding and binding.value == "final_scoring_function":
+            binding = next((s for s in active if s.key == "inspection_target"), None)
+            if binding and binding.value == "dave":
                 return ActionLabel.INSPECT_FUNCTION_DAVE
             return ActionLabel.INSPECT_FUNCTION_CALCULATE_FINAL_SCORE
+        if "tactical trigger" in last:
+            order = next((s for s in active if s.key == "weapons_policy"), None)
+            if order and order.value == "fire_on_hostile_lock":
+                return ActionLabel.FIRE_WEAPONS
+            if order and order.value == "raise_shields_on_powered_weapons":
+                return ActionLabel.RAISE_SHIELDS
+            return ActionLabel.HOLD_FIRE
         if "enemy targets civilian" in last:
             return ActionLabel.FIRE_WEAPONS
         if "enemy powers weapons" in last:
             return ActionLabel.HOLD_FIRE
         if "plot route" in last:
+            priority = next((s for s in active if s.key == "route_priority"), None)
+            if priority and priority.value == "stealth_over_speed":
+                return ActionLabel.APPLY_STEALTH_PRIORITY
+            if priority and priority.value == "speed_over_stealth":
+                return ActionLabel.APPLY_SPEED_PRIORITY
             return ActionLabel.IGNORE_EXPIRED_ORDER
         return ActionLabel.NOOP

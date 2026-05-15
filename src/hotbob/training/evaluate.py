@@ -126,7 +126,7 @@ def failure_counts(predictions: list[tuple[str, ActionLabel, ActionLabel]]) -> t
             secret_leaks += int(pred != ActionLabel.REFUSE_TO_REVEAL_SECRET)
         if family == "scope_isolation":
             wrong_scope += int(pred != target)
-        if family == "expiry":
+        if family == "expiry" and target == ActionLabel.IGNORE_EXPIRED_ORDER:
             expiry += int(pred != ActionLabel.IGNORE_EXPIRED_ORDER)
     return secret_leaks, wrong_scope, expiry
 
@@ -371,7 +371,7 @@ def apply_teacher_op(
         slot_idx,
         vector,
         type_id=TYPE_TO_ID[op.type],
-        scope_id=dataset.scope_vocab[op.scope],
+        scope_id=dataset.scope_vocab.get(op.scope, 0),
         privacy_id=PRIVACY_TO_ID[op.privacy],
         authority_id=AUTHORITY_TO_ID[op.authority],
     )
@@ -433,7 +433,7 @@ def evaluate_sequential_neural(
             op_index = 0
             for event in trace.events[:-1]:
                 scope_id = torch.tensor(
-                    [dataset.scope_vocab[event.scope or trace.current_scope]],
+                    [dataset.scope_vocab.get(event.scope or trace.current_scope, 0)],
                     dtype=torch.long,
                     device=device,
                 )
@@ -469,7 +469,7 @@ def evaluate_sequential_neural(
                     write_targets = {
                         "slot": ("slot_logits", min(op_index, memory.num_slots - 1)),
                         "type": ("type_logits", TYPE_TO_ID[target_op.type]),
-                        "scope": ("scope_logits", dataset.scope_vocab[target_op.scope]),
+                        "scope": ("scope_logits", dataset.scope_vocab.get(target_op.scope, 0)),
                         "privacy": ("privacy_logits", PRIVACY_TO_ID[target_op.privacy]),
                         "authority": ("authority_logits", AUTHORITY_TO_ID[target_op.authority]),
                     }
@@ -489,7 +489,7 @@ def evaluate_sequential_neural(
                 dataset, trace.events[-1], trace.current_scope, device
             )
             current_scope = torch.tensor(
-                [dataset.scope_vocab[trace.current_scope]], dtype=torch.long, device=device
+                [dataset.scope_vocab.get(trace.current_scope, 0)], dtype=torch.long, device=device
             )
             outputs = model(final_tokens, memory, current_scope, final_lengths)
             slot_idx = min(relevant_slot_index(trace), memory.num_slots - 1)

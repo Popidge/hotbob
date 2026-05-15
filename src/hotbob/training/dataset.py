@@ -151,11 +151,11 @@ class TraceDataset(Dataset[EncodedTrace]):
             event_has_write=event_targets["has_write"],
             event_memory_value_tokens=event_targets["memory_value_tokens"],
             memory_value_tokens=memory_value_tokens,
-            current_scope_id=self.scope_vocab[trace.current_scope],
+            current_scope_id=self.scope_vocab.get(trace.current_scope, 0),
             action_id=ACTION_TO_ID[trace.expected_final_action],
             op_id=OP_TO_ID[first_op.op],
             type_id=TYPE_TO_ID[first_op.type],
-            scope_id=self.scope_vocab[first_op.scope],
+            scope_id=self.scope_vocab.get(first_op.scope, 0),
             privacy_id=PRIVACY_TO_ID[first_op.privacy],
             authority_id=AUTHORITY_TO_ID[first_op.authority],
             slot_id=0,
@@ -197,7 +197,7 @@ class TraceDataset(Dataset[EncodedTrace]):
             if target_op is not None and (event.scope or trace.current_scope) == target_op.scope:
                 op_ids.append(OP_TO_ID[target_op.op])
                 type_ids.append(TYPE_TO_ID[target_op.type])
-                scope_ids.append(self.scope_vocab[target_op.scope])
+                scope_ids.append(self.scope_vocab.get(target_op.scope, 0))
                 privacy_ids.append(PRIVACY_TO_ID[target_op.privacy])
                 authority_ids.append(AUTHORITY_TO_ID[target_op.authority])
                 slot_ids.append(min(op_index, 31))
@@ -207,7 +207,7 @@ class TraceDataset(Dataset[EncodedTrace]):
             else:
                 op_ids.append(OP_TO_ID[MemoryOpName.NOOP])
                 type_ids.append(TYPE_TO_ID[default_op.type])
-                scope_ids.append(self.scope_vocab[event.scope or trace.current_scope])
+                scope_ids.append(self.scope_vocab.get(event.scope or trace.current_scope, 0))
                 privacy_ids.append(PRIVACY_TO_ID[default_op.privacy])
                 authority_ids.append(AUTHORITY_TO_ID[default_op.authority])
                 slot_ids.append(0)

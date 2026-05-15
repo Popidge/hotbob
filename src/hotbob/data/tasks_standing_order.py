@@ -16,18 +16,31 @@ from hotbob.types import (
 
 def make_standing_order_trace(rng: random.Random, idx: int) -> TaskTrace:
     scope = f"mission_{idx % 13}"
-    civilians = rng.random() < 0.45
-    event = (
-        "Enemy targets civilian transport."
-        if civilians
-        else "Enemy powers weapons. Civilians absent."
+    policy, value, action = rng.choice(
+        [
+            (
+                "Hold fire unless civilians are at risk.",
+                "hold_fire_unless_civilians_at_risk",
+                ActionLabel.HOLD_FIRE,
+            ),
+            (
+                "Raise shields when weapons are powered.",
+                "raise_shields_on_powered_weapons",
+                ActionLabel.RAISE_SHIELDS,
+            ),
+            (
+                "Fire weapons when hostile lock is confirmed.",
+                "fire_on_hostile_lock",
+                ActionLabel.FIRE_WEAPONS,
+            ),
+        ]
     )
-    action = ActionLabel.FIRE_WEAPONS if civilians else ActionLabel.HOLD_FIRE
+    event = "A tactical trigger is present. Apply standing order."
     return TaskTrace(
         events=[
             TraceEvent(
                 role="CAPTAIN",
-                content="Do not fire first unless civilians are at risk.",
+                content=policy,
                 scope=scope,
             ),
             TraceEvent(role="SIM_EVENT", content=event, scope=scope),
@@ -37,7 +50,7 @@ def make_standing_order_trace(rng: random.Random, idx: int) -> TaskTrace:
                 op=MemoryOpName.WRITE,
                 type=MemoryType.STANDING_ORDER,
                 key="weapons_policy",
-                value="no_fire_first_unless_civilians_at_risk",
+                value=value,
                 scope=scope,
                 privacy=MemoryPrivacy.VISIBLE,
                 authority=MemoryAuthority.USER,
@@ -47,7 +60,6 @@ def make_standing_order_trace(rng: random.Random, idx: int) -> TaskTrace:
         current_scope=scope,
         task_family="standing_order",
         metadata={
-            "civilians_at_risk": civilians,
             "memory_required": True,
             "final_event_hides_memory_value": True,
         },

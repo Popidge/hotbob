@@ -15,6 +15,13 @@ GENERIC_MEMORY_TOKENS = {
     "color",
     "speed",
     "stealth",
+    "weapons",
+    "fire",
+    "hold",
+    "raise",
+    "shields",
+    "route",
+    "inspection",
 }
 
 

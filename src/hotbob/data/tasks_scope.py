@@ -15,39 +15,52 @@ from hotbob.types import (
 
 
 def make_scope_isolation_trace(rng: random.Random, idx: int) -> TaskTrace:
-    current = rng.choice(["repo_a", "repo_b"])
-    target = (
-        ActionLabel.INSPECT_FUNCTION_DAVE
-        if current == "repo_a"
-        else ActionLabel.INSPECT_FUNCTION_CALCULATE_FINAL_SCORE
+    scope_a = f"repo_{idx}_a"
+    scope_b = f"repo_{idx}_b"
+    current = rng.choice([scope_a, scope_b])
+    a_value, a_action = rng.choice(
+        [
+            ("dave", ActionLabel.INSPECT_FUNCTION_DAVE),
+            ("calculate_final_score", ActionLabel.INSPECT_FUNCTION_CALCULATE_FINAL_SCORE),
+        ]
     )
+    b_value, b_action = (
+        ("calculate_final_score", ActionLabel.INSPECT_FUNCTION_CALCULATE_FINAL_SCORE)
+        if a_value == "dave"
+        else ("dave", ActionLabel.INSPECT_FUNCTION_DAVE)
+    )
+    target = a_action if current == scope_a else b_action
     return TaskTrace(
         events=[
             TraceEvent(
-                role="USER", content="In REPO_A, dave = final scoring function.", scope="repo_a"
+                role="USER",
+                content=f"In this scope, the inspection target is {a_value}.",
+                scope=scope_a,
             ),
             TraceEvent(
-                role="USER", content="In REPO_B, dave = database migration script.", scope="repo_b"
+                role="USER",
+                content=f"In this scope, the inspection target is {b_value}.",
+                scope=scope_b,
             ),
-            TraceEvent(role="CURRENT_SCOPE", content=current.upper(), scope=current),
+            TraceEvent(role="CURRENT_SCOPE", content="selected scope", scope=current),
             TraceEvent(role="USER", content="Inspect the scoped target.", scope=current),
         ],
         expected_memory_ops=[
             MemoryOp(
                 op=MemoryOpName.WRITE,
                 type=MemoryType.SYMBOL_BINDING,
-                key="dave",
-                value="final_scoring_function",
-                scope="repo_a",
+                key="inspection_target",
+                value=a_value,
+                scope=scope_a,
                 privacy=MemoryPrivacy.VISIBLE,
                 authority=MemoryAuthority.USER,
             ),
             MemoryOp(
                 op=MemoryOpName.WRITE,
                 type=MemoryType.SYMBOL_BINDING,
-                key="dave",
-                value="database_migration_script",
-                scope="repo_b",
+                key="inspection_target",
+                value=b_value,
+                scope=scope_b,
                 privacy=MemoryPrivacy.VISIBLE,
                 authority=MemoryAuthority.USER,
             ),

@@ -19,3 +19,11 @@ def test_memory_required_families_have_nontrivial_action_balance() -> None:
         trace.expected_final_action for trace in traces if trace.task_family == "symbol_binding"
     }
     assert len(symbol_actions) == 2
+    expiry_actions = {
+        trace.expected_final_action for trace in traces if trace.task_family == "expiry"
+    }
+    standing_actions = {
+        trace.expected_final_action for trace in traces if trace.task_family == "standing_order"
+    }
+    assert len(expiry_actions) >= 3
+    assert len(standing_actions) >= 3
