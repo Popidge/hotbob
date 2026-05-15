@@ -91,6 +91,7 @@ def evaluate_neural(
         num_scopes=max(dataset.scope_vocab.values()) + 1,
         num_privacy=len(PRIVACY_TO_ID),
         num_authority=len(AUTHORITY_TO_ID),
+        max_seq_len=config.get("max_seq_len", 256),
     ).to(device)
     model.load_state_dict(checkpoint["model_state"])
     model.eval()

@@ -50,6 +50,7 @@ def main() -> None:
         num_scopes=max(dataset.scope_vocab.values()) + 1,
         num_privacy=len(PRIVACY_TO_ID),
         num_authority=len(AUTHORITY_TO_ID),
+        max_seq_len=dataset.max_seq_len,
     ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
     ce = nn.CrossEntropyLoss()
@@ -130,6 +131,7 @@ def main() -> None:
             "d_model": d_model,
             "num_memory_slots": num_memory_slots,
             "action_vocab_size": len(ActionLabel),
+            "max_seq_len": dataset.max_seq_len,
         },
     }
     torch.save(checkpoint, "runs/latest.pt")

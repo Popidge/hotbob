@@ -20,9 +20,10 @@ class StatefulTransformer(nn.Module):
         num_scopes: int = 64,
         num_privacy: int = 3,
         num_authority: int = 4,
+        max_seq_len: int = 256,
     ) -> None:
         super().__init__()
-        self.transformer = TinyTransformer(vocab_size, d_model=d_model)
+        self.transformer = TinyTransformer(vocab_size, d_model=d_model, max_seq_len=max_seq_len)
         self.memory_read = MemoryRead(d_model)
         self.memory_write = MemoryWrite(
             d_model=d_model,
