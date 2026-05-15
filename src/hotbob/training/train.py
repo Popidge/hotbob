@@ -126,7 +126,14 @@ def main() -> None:
                 flat_event_value_tokens[flat_write_mask],
                 flat_event_value_mask[flat_write_mask],
             ).detach()
-            loss = loss + F.mse_loss(event_outputs["value_vector"][flat_write_mask], target_value)
+            predicted_value = event_outputs["value_vector"][flat_write_mask]
+            loss = loss + F.mse_loss(predicted_value, target_value)
+            if predicted_value.shape[0] > 1:
+                pred_norm = F.normalize(predicted_value, dim=-1)
+                target_norm = F.normalize(target_value, dim=-1)
+                logits = pred_norm @ target_norm.T / 0.1
+                labels = torch.arange(predicted_value.shape[0], device=device)
+                loss = loss + F.cross_entropy(logits, labels)
         read_attn = outputs["read_attention"][
             torch.arange(batch["tokens"].shape[0], device=device),
             outputs["boundary_indices"],
