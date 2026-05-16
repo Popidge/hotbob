@@ -35,7 +35,13 @@ def make_standing_order_trace(rng: random.Random, idx: int) -> TaskTrace:
             ),
         ]
     )
-    event = "A tactical trigger is present. Apply standing order."
+    event = rng.choice(
+        [
+            "A tactical trigger is present. Apply standing order.",
+            "The tactical condition now matches standing guidance.",
+            "A rules-of-engagement condition is active. Use the remembered instruction.",
+        ]
+    )
     return TaskTrace(
         events=[
             TraceEvent(
@@ -62,5 +68,6 @@ def make_standing_order_trace(rng: random.Random, idx: int) -> TaskTrace:
         metadata={
             "memory_required": True,
             "final_event_hides_memory_value": True,
+            "scenario": "standing_order_action",
         },
     )

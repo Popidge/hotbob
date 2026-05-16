@@ -78,5 +78,6 @@ def make_expiry_trace(rng: random.Random, idx: int) -> TaskTrace:
             "active_preference": active,
             "memory_required": True,
             "final_event_hides_memory_value": True,
+            "scenario": "expiry_active" if active else "expiry_expired",
         },
     )

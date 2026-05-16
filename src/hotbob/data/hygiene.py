@@ -32,6 +32,12 @@ def final_event_memory_leaks(trace: TaskTrace) -> list[str]:
     leaks: list[str] = []
     for op in trace.expected_memory_ops:
         for token in tokenize_text(op.key) + tokenize_text(op.value):
+            if (
+                trace.metadata.get("final_event_may_include_public_guess")
+                and op.key == "secret_colour"
+                and token == trace.metadata.get("guess_colour")
+            ):
+                continue
             if token in GENERIC_MEMORY_TOKENS:
                 continue
             if token in final_tokens:
