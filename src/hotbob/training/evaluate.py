@@ -52,6 +52,56 @@ class EvalResult:
     boundary_tn: int = 0
     read_target_mass_sum: float = 0.0
     read_target_mass_count: int = 0
+    family_action_confusion: dict[str, Counter[tuple[str, str]]] | None = None
+    family_read_mass_sum: Counter[str] | None = None
+    family_read_mass_count: Counter[str] | None = None
+    family_memory_required_total: Counter[str] | None = None
+    family_memory_required_correct: Counter[str] | None = None
+
+
+def diagnostic_scenario(trace: TaskTrace) -> str:
+    if trace.task_family == "hidden_colour":
+        if trace.expected_final_action == ActionLabel.REFUSE_TO_REVEAL_SECRET:
+            return "hidden_colour_reveal"
+        return "hidden_colour_guess"
+    if trace.task_family == "expiry":
+        return "expiry_active" if trace.metadata.get("active_preference") else "expiry_expired"
+    if trace.task_family == "standing_order":
+        return "standing_order_action"
+    return trace.task_family
+
+
+def update_family_diagnostics(
+    *,
+    trace: TaskTrace,
+    pred: ActionLabel,
+    target: ActionLabel,
+    target_read_mass: float,
+    action_confusion: dict[str, Counter[tuple[str, str]]],
+    read_mass_sum: Counter[str],
+    read_mass_count: Counter[str],
+    memory_required_total: Counter[str],
+    memory_required_correct: Counter[str],
+) -> None:
+    scenario = diagnostic_scenario(trace)
+    action_confusion.setdefault(scenario, Counter())
+    action_confusion[scenario][(str(target), str(pred))] += 1
+    read_mass_sum[scenario] += target_read_mass
+    read_mass_count[scenario] += 1
+    if is_memory_required_trace(trace):
+        memory_required_total[scenario] += 1
+        memory_required_correct[scenario] += int(pred == target)
+
+
+def top_confusions(confusions: Counter[tuple[str, str]], limit: int = 3) -> str:
+    misses = [
+        (pair, count)
+        for pair, count in confusions.most_common()
+        if pair[0] != pair[1]
+    ][:limit]
+    if not misses:
+        return "none"
+    return ", ".join(f"{target}->{pred}:{count}" for (target, pred), count in misses)
 
 
 def boundary_scores(result: EvalResult | None) -> tuple[str, str, str]:
@@ -144,6 +194,34 @@ def family_accuracy(result: EvalResult | None, family: str) -> str:
     return f"{result.correct[family] / result.totals[family]:.3f}"
 
 
+def diagnostic_accuracy(result: EvalResult | None, scenario: str) -> str:
+    if (
+        result is None
+        or result.family_memory_required_total is None
+        or result.family_memory_required_total[scenario] == 0
+    ):
+        return "n/a"
+    total = result.family_memory_required_total[scenario]
+    return f"{result.family_memory_required_correct[scenario] / total:.3f}"
+
+
+def diagnostic_read_mass(result: EvalResult | None, scenario: str) -> str:
+    if (
+        result is None
+        or result.family_read_mass_count is None
+        or result.family_read_mass_count[scenario] == 0
+        or result.family_read_mass_sum is None
+    ):
+        return "n/a"
+    return f"{result.family_read_mass_sum[scenario] / result.family_read_mass_count[scenario]:.3f}"
+
+
+def diagnostic_total(result: EvalResult | None, scenario: str) -> str:
+    if result is None or result.family_read_mass_count is None:
+        return "n/a"
+    return str(result.family_read_mass_count[scenario])
+
+
 def evaluate_neural(
     checkpoint_path: str,
     traces,
@@ -188,6 +266,17 @@ def evaluate_neural(
     boundary_counts: Counter[str] = Counter()
     read_target_mass_sum = 0.0
     read_target_mass_count = 0
+    family_action_confusion: dict[str, Counter[tuple[str, str]]] = {
+        "standing_order_action": Counter(),
+        "hidden_colour_reveal": Counter(),
+        "hidden_colour_guess": Counter(),
+        "expiry_active": Counter(),
+        "expiry_expired": Counter(),
+    }
+    family_read_mass_sum: Counter[str] = Counter()
+    family_read_mass_count: Counter[str] = Counter()
+    family_memory_required_total: Counter[str] = Counter()
+    family_memory_required_correct: Counter[str] = Counter()
     offset = 0
     with torch.no_grad():
         for batch in loader:
@@ -260,6 +349,7 @@ def evaluate_neural(
             read_target_mass_count += int(target_read_mass.numel())
             pred_ids = outputs["action_logits"].argmax(dim=-1).cpu().tolist()
             target_ids = batch["action_ids"].cpu().tolist()
+            target_read_masses = target_read_mass.cpu().tolist()
             for row, (pred_id, target_id) in enumerate(zip(pred_ids, target_ids, strict=True)):
                 trace = traces[offset + row]
                 pred = ID_TO_ACTION[pred_id]
@@ -269,6 +359,17 @@ def evaluate_neural(
                 if is_memory_required_trace(trace):
                     memory_required_total += 1
                     memory_required_correct += int(pred == target)
+                update_family_diagnostics(
+                    trace=trace,
+                    pred=pred,
+                    target=target,
+                    target_read_mass=float(target_read_masses[row]),
+                    action_confusion=family_action_confusion,
+                    read_mass_sum=family_read_mass_sum,
+                    read_mass_count=family_read_mass_count,
+                    memory_required_total=family_memory_required_total,
+                    memory_required_correct=family_memory_required_correct,
+                )
                 predictions.append((trace.task_family, pred, target))
             offset += len(pred_ids)
     return EvalResult(
@@ -288,6 +389,11 @@ def evaluate_neural(
         boundary_tn=boundary_counts["tn"],
         read_target_mass_sum=read_target_mass_sum,
         read_target_mass_count=read_target_mass_count,
+        family_action_confusion=family_action_confusion,
+        family_read_mass_sum=family_read_mass_sum,
+        family_read_mass_count=family_read_mass_count,
+        family_memory_required_total=family_memory_required_total,
+        family_memory_required_correct=family_memory_required_correct,
     )
 
 
@@ -465,6 +571,17 @@ def evaluate_sequential_neural(
     boundary_counts: Counter[str] = Counter()
     read_target_mass_sum = 0.0
     read_target_mass_count = 0
+    family_action_confusion: dict[str, Counter[tuple[str, str]]] = {
+        "standing_order_action": Counter(),
+        "hidden_colour_reveal": Counter(),
+        "hidden_colour_guess": Counter(),
+        "expiry_active": Counter(),
+        "expiry_expired": Counter(),
+    }
+    family_read_mass_sum: Counter[str] = Counter()
+    family_read_mass_count: Counter[str] = Counter()
+    family_memory_required_total: Counter[str] = Counter()
+    family_memory_required_correct: Counter[str] = Counter()
     with torch.no_grad():
         for trace in traces:
             memory = MemoryBank(
@@ -560,11 +677,12 @@ def evaluate_sequential_neural(
             )
             outputs = model(final_tokens, memory, current_scope, final_lengths)
             slot_idx = min(relevant_slot_index(trace), memory.num_slots - 1)
-            read_target_mass_sum += float(
+            target_read_mass = float(
                 outputs["read_attention"][0, int(outputs["boundary_indices"][0].item()), slot_idx]
                 .cpu()
                 .item()
             )
+            read_target_mass_sum += target_read_mass
             read_target_mass_count += 1
             pred = ID_TO_ACTION[int(outputs["action_logits"].argmax(dim=-1)[0].item())]
             target = trace.expected_final_action
@@ -573,6 +691,17 @@ def evaluate_sequential_neural(
             if is_memory_required_trace(trace):
                 memory_required_total += 1
                 memory_required_correct += int(pred == target)
+            update_family_diagnostics(
+                trace=trace,
+                pred=pred,
+                target=target,
+                target_read_mass=target_read_mass,
+                action_confusion=family_action_confusion,
+                read_mass_sum=family_read_mass_sum,
+                read_mass_count=family_read_mass_count,
+                memory_required_total=family_memory_required_total,
+                memory_required_correct=family_memory_required_correct,
+            )
             predictions.append((trace.task_family, pred, target))
     return EvalResult(
         totals=totals,
@@ -591,6 +720,11 @@ def evaluate_sequential_neural(
         boundary_tn=boundary_counts["tn"],
         read_target_mass_sum=read_target_mass_sum,
         read_target_mass_count=read_target_mass_count,
+        family_action_confusion=family_action_confusion,
+        family_read_mass_sum=family_read_mass_sum,
+        family_read_mass_count=family_read_mass_count,
+        family_memory_required_total=family_memory_required_total,
+        family_memory_required_correct=family_memory_required_correct,
     )
 
 
@@ -798,11 +932,41 @@ def main() -> None:
             read_target_mass(result),
             boundary_scores(result)[2],
         )
+    diagnostics_table = Table(title="Task-family diagnostics")
+    diagnostics_table.add_column("Family")
+    diagnostics_table.add_column("Scenario")
+    diagnostics_table.add_column("Total")
+    diagnostics_table.add_column("Accuracy")
+    diagnostics_table.add_column("Target-slot read mass")
+    diagnostics_table.add_column("Top confusions")
+    diagnostic_result = sequential_predicted_result or neural_result
+    diagnostic_rows = [
+        ("standing_order", "standing_order_action"),
+        ("hidden_colour", "hidden_colour_reveal"),
+        ("hidden_colour", "hidden_colour_guess"),
+        ("expiry", "expiry_active"),
+        ("expiry", "expiry_expired"),
+    ]
+    for family, scenario in diagnostic_rows:
+        confusions = (
+            diagnostic_result.family_action_confusion.get(scenario, Counter())
+            if diagnostic_result is not None and diagnostic_result.family_action_confusion is not None
+            else Counter()
+        )
+        diagnostics_table.add_row(
+            family,
+            scenario,
+            diagnostic_total(diagnostic_result, scenario),
+            diagnostic_accuracy(diagnostic_result, scenario),
+            diagnostic_read_mass(diagnostic_result, scenario),
+            top_confusions(confusions),
+        )
     Console().print(table)
     Console().print(memory_table)
     Console().print(boundary_table)
     Console().print(retrieval_table)
     Console().print(ablation_table)
+    Console().print(diagnostics_table)
 
 
 if __name__ == "__main__":

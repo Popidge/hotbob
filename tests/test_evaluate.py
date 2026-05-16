@@ -1,5 +1,12 @@
 from hotbob.data.traces import generate_traces, write_jsonl
-from hotbob.training.evaluate import main as evaluate_main
+from hotbob.training.evaluate import (
+    diagnostic_scenario,
+    main as evaluate_main,
+    top_confusions,
+    update_family_diagnostics,
+)
+from hotbob.types import ActionLabel
+from collections import Counter
 from hotbob.training.train import main as train_main
 
 
@@ -43,3 +50,39 @@ def test_evaluate_loads_checkpoint(tmp_path, monkeypatch, capsys) -> None:
     assert "Boundary write decision metrics" in output
     assert "Memory retrieval metrics" in output
     assert "Sequential predicted oracle ablations" in output
+    assert "Task-family diagnostics" in output
+
+
+def test_family_diagnostic_helpers_track_scenarios() -> None:
+    trace = next(
+        trace
+        for trace in generate_traces(30, seed=5)
+        if trace.task_family == "hidden_colour"
+        and trace.expected_final_action == ActionLabel.REFUSE_TO_REVEAL_SECRET
+    )
+    action_confusion = {"hidden_colour_reveal": Counter()}
+    read_mass_sum: Counter[str] = Counter()
+    read_mass_count: Counter[str] = Counter()
+    memory_total: Counter[str] = Counter()
+    memory_correct: Counter[str] = Counter()
+
+    update_family_diagnostics(
+        trace=trace,
+        pred=ActionLabel.ANSWER_NO,
+        target=trace.expected_final_action,
+        target_read_mass=0.75,
+        action_confusion=action_confusion,
+        read_mass_sum=read_mass_sum,
+        read_mass_count=read_mass_count,
+        memory_required_total=memory_total,
+        memory_required_correct=memory_correct,
+    )
+
+    scenario = diagnostic_scenario(trace)
+    assert scenario == "hidden_colour_reveal"
+    assert action_confusion[scenario][("REFUSE_TO_REVEAL_SECRET", "ANSWER_NO")] == 1
+    assert read_mass_sum[scenario] == 0.75
+    assert read_mass_count[scenario] == 1
+    assert memory_total[scenario] == 1
+    assert memory_correct[scenario] == 0
+    assert top_confusions(action_confusion[scenario]) == "REFUSE_TO_REVEAL_SECRET->ANSWER_NO:1"
