@@ -67,20 +67,57 @@ class MemoryBank:
         scope_match = self.scope_ids == current_scope.to(self.device).unsqueeze(-1)
         return self.occupied & scope_match & (self.strength > 0)
 
-    def debug_dump(self) -> list[dict[str, int | float | bool]]:
+    def debug_dump(
+        self,
+        *,
+        occupied_only: bool = True,
+        read_attention: torch.Tensor | None = None,
+        type_names: dict[int, str] | None = None,
+        scope_names: dict[int, str] | None = None,
+        privacy_names: dict[int, str] | None = None,
+        authority_names: dict[int, str] | None = None,
+        value_class_names: dict[int, str] | None = None,
+        value_class_ids: torch.Tensor | None = None,
+    ) -> list[dict[str, int | float | bool | str]]:
         rows = []
         for b in range(self.occupied.shape[0]):
             for s in range(self.num_slots):
+                if occupied_only and not bool(self.occupied[b, s].item()):
+                    continue
+                type_id = int(self.type_ids[b, s].item())
+                scope_id = int(self.scope_ids[b, s].item())
+                privacy_id = int(self.privacy_ids[b, s].item())
+                authority_id = int(self.authority_ids[b, s].item())
                 rows.append(
                     {
                         "batch": b,
                         "slot": s,
                         "occupied": bool(self.occupied[b, s].item()),
                         "strength": float(self.strength[b, s].item()),
-                        "type_id": int(self.type_ids[b, s].item()),
-                        "scope_id": int(self.scope_ids[b, s].item()),
-                        "privacy_id": int(self.privacy_ids[b, s].item()),
-                        "authority_id": int(self.authority_ids[b, s].item()),
+                        "vector_norm": float(torch.linalg.vector_norm(self.vectors[b, s]).item()),
+                        "type_id": type_id,
+                        "scope_id": scope_id,
+                        "privacy_id": privacy_id,
+                        "authority_id": authority_id,
                     }
                 )
+                row = rows[-1]
+                if read_attention is not None:
+                    row["read_attention"] = float(read_attention[b, s].item())
+                if type_names is not None:
+                    row["type"] = type_names.get(type_id, str(type_id))
+                if scope_names is not None:
+                    row["scope"] = scope_names.get(scope_id, str(scope_id))
+                if privacy_names is not None:
+                    row["privacy"] = privacy_names.get(privacy_id, str(privacy_id))
+                if authority_names is not None:
+                    row["authority"] = authority_names.get(authority_id, str(authority_id))
+                if value_class_ids is not None:
+                    value_class_id = int(value_class_ids[b, s].item())
+                    row["value_class_id"] = value_class_id
+                    if value_class_names is not None:
+                        row["value_class"] = value_class_names.get(
+                            value_class_id,
+                            str(value_class_id),
+                        )
         return rows

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,10 +33,13 @@ from hotbob.training.memory_teacher import (
     build_teacher_forced_memory,
     mean_value_embedding,
 )
-from hotbob.types import ActionLabel, MemoryOpName, TaskTrace, TraceEvent
+from hotbob.types import ActionLabel, MemoryOpName, MemoryPrivacy, TaskTrace, TraceEvent
 
 ID_TO_ACTION = {idx: label for label, idx in ACTION_TO_ID.items()}
 ID_TO_OP = {idx: label for label, idx in OP_TO_ID.items()}
+ID_TO_TYPE = {idx: str(label) for label, idx in TYPE_TO_ID.items()}
+ID_TO_PRIVACY = {idx: str(label) for label, idx in PRIVACY_TO_ID.items()}
+ID_TO_AUTHORITY = {idx: str(label) for label, idx in AUTHORITY_TO_ID.items()}
 
 
 @dataclass(frozen=True)
@@ -728,11 +732,155 @@ def evaluate_sequential_neural(
     )
 
 
+def redacted_memory_value(trace: TaskTrace, slot: int, include_private_values: bool) -> str | None:
+    if slot >= len(trace.expected_memory_ops):
+        return None
+    op = trace.expected_memory_ops[slot]
+    if op.privacy == MemoryPrivacy.HIDDEN_FROM_USER and not include_private_values:
+        return "<redacted>"
+    return op.value
+
+
+def write_debug_dumps(
+    *,
+    checkpoint_path: str,
+    traces: list[TaskTrace],
+    device: str,
+    out_path: str,
+    max_traces: int,
+    families: set[str],
+    include_private_values: bool,
+) -> None:
+    loaded = load_model_and_dataset(checkpoint_path, traces, device)
+    if loaded is None:
+        return
+    model, dataset, config = loaded
+    scope_names = {idx: scope for scope, idx in dataset.scope_vocab.items()}
+    value_class_names = {idx: value for value, idx in dataset.value_vocab.items()}
+    rows_written = 0
+    path = Path(out_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        with torch.no_grad():
+            for trace_idx, trace in enumerate(traces):
+                if rows_written >= max_traces:
+                    break
+                if families and trace.task_family not in families:
+                    continue
+                memory = MemoryBank(
+                    num_slots=config["num_memory_slots"],
+                    d_model=config["d_model"],
+                    device=device,
+                )
+                memory.reset(1)
+                write_decisions = []
+                op_index = 0
+                for event_index, event in enumerate(trace.events[:-1]):
+                    scope_id = torch.tensor(
+                        [
+                            dataset.scope_vocab.get(
+                                normalize_scope(event.scope or trace.current_scope), 0
+                            )
+                        ],
+                        dtype=torch.long,
+                        device=device,
+                    )
+                    event_tokens, event_lengths = encode_event_tensor(
+                        dataset, event, trace.current_scope, device
+                    )
+                    outputs = model(event_tokens, memory, scope_id, event_lengths)
+                    pred_op = ID_TO_OP[int(outputs["op_logits"].argmax(dim=-1)[0].item())]
+                    target_op = (
+                        trace.expected_memory_ops[op_index]
+                        if op_index < len(trace.expected_memory_ops)
+                        else None
+                    )
+                    target_is_write = (
+                        target_op is not None
+                        and (event.scope or trace.current_scope) == target_op.scope
+                    )
+                    write_decisions.append(
+                        {
+                            "event_index": event_index,
+                            "role": event.role,
+                            "scope": event.scope,
+                            "predicted_op": str(pred_op),
+                            "target_op": str(target_op.op)
+                            if target_is_write and target_op is not None
+                            else str(MemoryOpName.NOOP),
+                            "predicted_slot": int(outputs["slot_logits"].argmax(dim=-1)[0].item()),
+                            "target_slot": min(op_index, memory.num_slots - 1)
+                            if target_is_write
+                            else None,
+                        }
+                    )
+                    if target_is_write and target_op is not None:
+                        apply_teacher_op(memory, model, dataset, trace, op_index, device)
+                        op_index += 1
+                final_tokens, final_lengths = encode_event_tensor(
+                    dataset, trace.events[-1], trace.current_scope, device
+                )
+                current_scope = torch.tensor(
+                    [dataset.scope_vocab.get(normalize_scope(trace.current_scope), 0)],
+                    dtype=torch.long,
+                    device=device,
+                )
+                outputs = model(final_tokens, memory, current_scope, final_lengths)
+                boundary_idx = int(outputs["boundary_indices"][0].item())
+                read_attention = outputs["read_attention"][:, boundary_idx, :]
+                pred = ID_TO_ACTION[int(outputs["action_logits"].argmax(dim=-1)[0].item())]
+                slots = memory.debug_dump(
+                    read_attention=read_attention,
+                    type_names=ID_TO_TYPE,
+                    scope_names=scope_names,
+                    privacy_names=ID_TO_PRIVACY,
+                    authority_names=ID_TO_AUTHORITY,
+                    value_class_names=value_class_names,
+                )
+                for slot in slots:
+                    slot["value"] = redacted_memory_value(
+                        trace, int(slot["slot"]), include_private_values
+                    )
+                row = {
+                    "trace_index": trace_idx,
+                    "task_family": trace.task_family,
+                    "scenario": diagnostic_scenario(trace),
+                    "expected_action": str(trace.expected_final_action),
+                    "predicted_action": str(pred),
+                    "correct": pred == trace.expected_final_action,
+                    "current_scope": trace.current_scope,
+                    "final_event": trace.events[-1].model_dump(mode="json"),
+                    "active_memory_slots": slots,
+                    "read_attention_summary": sorted(
+                        [
+                            {
+                                "slot": int(slot),
+                                "mass": float(read_attention[0, slot].item()),
+                            }
+                            for slot in range(memory.num_slots)
+                        ],
+                        key=lambda item: item["mass"],
+                        reverse=True,
+                    )[:5],
+                    "write_decisions": write_decisions,
+                }
+                f.write(json.dumps(row) + "\n")
+                rows_written += 1
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", default="runs/latest.pt")
     parser.add_argument("--traces", required=True)
     parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--debug-dumps-out", default=None)
+    parser.add_argument("--debug-max-traces", type=int, default=20)
+    parser.add_argument(
+        "--debug-families",
+        nargs="*",
+        default=["standing_order", "hidden_colour", "expiry"],
+    )
+    parser.add_argument("--debug-include-private-values", action="store_true")
     args = parser.parse_args()
     traces = read_jsonl(args.traces)
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -950,7 +1098,8 @@ def main() -> None:
     for family, scenario in diagnostic_rows:
         confusions = (
             diagnostic_result.family_action_confusion.get(scenario, Counter())
-            if diagnostic_result is not None and diagnostic_result.family_action_confusion is not None
+            if diagnostic_result is not None
+            and diagnostic_result.family_action_confusion is not None
             else Counter()
         )
         diagnostics_table.add_row(
@@ -967,6 +1116,16 @@ def main() -> None:
     Console().print(retrieval_table)
     Console().print(ablation_table)
     Console().print(diagnostics_table)
+    if args.debug_dumps_out:
+        write_debug_dumps(
+            checkpoint_path=args.checkpoint,
+            traces=traces,
+            device=device,
+            out_path=args.debug_dumps_out,
+            max_traces=args.debug_max_traces,
+            families=set(args.debug_families),
+            include_private_values=args.debug_include_private_values,
+        )
 
 
 if __name__ == "__main__":

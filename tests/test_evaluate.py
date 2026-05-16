@@ -1,13 +1,15 @@
+import json
+from collections import Counter
+
 from hotbob.data.traces import generate_traces, write_jsonl
 from hotbob.training.evaluate import (
     diagnostic_scenario,
-    main as evaluate_main,
     top_confusions,
     update_family_diagnostics,
 )
-from hotbob.types import ActionLabel
-from collections import Counter
+from hotbob.training.evaluate import main as evaluate_main
 from hotbob.training.train import main as train_main
+from hotbob.types import ActionLabel
 
 
 def test_evaluate_loads_checkpoint(tmp_path, monkeypatch, capsys) -> None:
@@ -51,6 +53,76 @@ def test_evaluate_loads_checkpoint(tmp_path, monkeypatch, capsys) -> None:
     assert "Memory retrieval metrics" in output
     assert "Sequential predicted oracle ablations" in output
     assert "Task-family diagnostics" in output
+
+
+def test_evaluate_debug_dump_redacts_private_values(tmp_path, monkeypatch) -> None:
+    traces = tmp_path / "traces.jsonl"
+    write_jsonl(generate_traces(20, seed=7), traces)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "train",
+            "--traces",
+            str(traces),
+            "--steps",
+            "2",
+            "--smoke",
+            "--batch-size",
+            "4",
+        ],
+    )
+    train_main()
+    redacted = tmp_path / "debug-redacted.jsonl"
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "evaluate",
+            "--checkpoint",
+            "runs/latest.pt",
+            "--traces",
+            str(traces),
+            "--batch-size",
+            "4",
+            "--debug-dumps-out",
+            str(redacted),
+            "--debug-families",
+            "hidden_colour",
+            "--debug-max-traces",
+            "1",
+        ],
+    )
+    evaluate_main()
+
+    row = json.loads(redacted.read_text(encoding="utf-8").splitlines()[0])
+    assert row["task_family"] == "hidden_colour"
+    assert row["active_memory_slots"]
+    assert row["active_memory_slots"][0]["value"] == "<redacted>"
+
+    unredacted = tmp_path / "debug-unredacted.jsonl"
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "evaluate",
+            "--checkpoint",
+            "runs/latest.pt",
+            "--traces",
+            str(traces),
+            "--batch-size",
+            "4",
+            "--debug-dumps-out",
+            str(unredacted),
+            "--debug-families",
+            "hidden_colour",
+            "--debug-max-traces",
+            "1",
+            "--debug-include-private-values",
+        ],
+    )
+    evaluate_main()
+
+    visible_row = json.loads(unredacted.read_text(encoding="utf-8").splitlines()[0])
+    assert visible_row["active_memory_slots"][0]["value"] != "<redacted>"
 
 
 def test_family_diagnostic_helpers_track_scenarios() -> None:
