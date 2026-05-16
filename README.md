@@ -16,6 +16,25 @@ HotBob aims to give the model a genuine **hot working memory** of its Bob: memor
 
 It is a working title. No further questions.
 
+## License And Contributions
+
+HotBob is licensed under the Apache License 2.0. That choice is intentional:
+it matches the Qwen model family used by the real-LLM adapter and keeps this
+experiment easy to fork, port, cite, extend, or repurpose.
+
+Contributions and derived work are welcome. Useful contributions include:
+
+- reproductions on other hardware, models, trace families, or longer runs
+- ports to other decoder models or memory injection mechanisms
+- better write controllers, value encoders, retrieval losses, or evaluators
+- negative results and ablations that clarify where this approach fails
+- docs, examples, bug fixes, cleanup, and smaller onboarding improvements
+
+If you build on this, you do not need permission. Fork it, publish your results,
+open issues, send PRs, or take the ideas into a different codebase. The goal is
+to make neural working-memory experiments easier for anyone exploring the same
+problem space.
+
 ## What Exists
 
 HotBob currently includes:

@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Scoped typed working-memory transformer research prototype"
 readme = "README.md"
 requires-python = ">=3.12"
+license = "Apache-2.0"
 dependencies = [
     "accelerate>=1.12.0",
     "einops>=0.8.2",
