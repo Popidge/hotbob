@@ -20,18 +20,18 @@ It is a working title. No further questions.
 
 HotBob currently includes:
 
-- synthetic task traces for secrets, symbol bindings, standing orders, scope isolation, and expiry
+- hygienic synthetic task traces for secrets, symbol bindings, standing orders, scope isolation, and expiry
 - typed memory operations: `WRITE`, `UPDATE`, `DELETE`, `NOOP`
 - memory metadata: type, scope, privacy, authority, slot, strength
 - a symbolic oracle baseline
 - a tensor `MemoryBank`
 - learned `MemoryRead` cross-attention over memory slots
-- learned `MemoryWrite` heads for write decisions and value vectors
+- learned `MemoryWrite` heads for write decisions, metadata, value vectors, and value-class probes
 - a tiny transformer action classifier
 - sequential event evaluation
 - prompt hygiene tests
 - held-out train/eval generation
-- memory-controller and retrieval metrics
+- memory-controller, retrieval, and audit metrics
 
 The model predicts categorical actions, not prose. This keeps failures visible.
 
@@ -43,7 +43,8 @@ The core loop is:
 2. Boundary events may trigger a memory write/update/delete.
 3. Memory is stored as typed tensor slots, not appended prose.
 4. Later action events are evaluated with only the final event text plus neural memory.
-5. The model reads memory through cross-attention and predicts an action.
+5. The model reads memory through cross-attention.
+6. The action head sees both the final hidden state and the retrieved memory context.
 
 The memory bank stores:
 
@@ -57,6 +58,20 @@ privacy_ids:   [batch, slots]
 authority_ids: [batch, slots]
 ```
 
+The memory write controller predicts:
+
+- operation: `NOOP`, `WRITE`, `UPDATE`, `DELETE`
+- slot
+- type
+- normalized scope
+- privacy
+- authority
+- value vector
+- value class probe
+- write gate
+
+The value class probe is an auditing surface: it helps inspect what a memory vector appears to encode without turning memory back into prompt text.
+
 ## Evaluation
 
 Evaluation compares:
@@ -67,6 +82,7 @@ Evaluation compares:
 - predicted-write memory
 - sequential teacher-forced memory
 - sequential predicted memory
+- sequential predicted memory with oracle slot/scope/value ablations
 
 Metrics include:
 
@@ -76,10 +92,14 @@ Metrics include:
 - wrong-scope retrieval failures
 - expiry failures
 - write-head accuracies
+- value-class probe accuracy
 - boundary write precision/recall/F1
 - target-slot read attention mass
+- oracle ablation scores for slot/scope/value failures
 
-Recent cleaner held-out runs show the intended gap: teacher-forced memory beats context-only when prompts are hygienic, while predicted memory still needs better write/value/retrieval training.
+Current held-out runs show the intended memory signal: context-only drops on memory-required prompts, teacher-forced memory improves performance, and sequential predicted memory now retrieves strongly after scope normalization and contrastive value-vector training.
+
+The current bottleneck is no longer basic memory storage/retrieval. The remaining failures are mostly in converting retrieved memory into the right action for harder task families such as standing orders and hidden-colour judgements.
 
 ## Commands
 
@@ -120,18 +140,19 @@ uv run python -m hotbob.training.evaluate --checkpoint runs/latest.pt --traces d
 
 ## Current Challenges
 
-The harness now exposes the real bottleneck:
+The harness now exposes a more specific bottleneck:
 
 - correct memory is useful
 - context-only prompts are no longer allowed to leak the answer
-- teacher-forced memory retrieves strongly
-- predicted memory is still weak
+- predicted and teacher-forced memory both retrieve strongly on the current synthetic setup
+- the memory controller can classify write boundaries, scopes, slots, metadata, and value classes well
+- some action families still do not reliably use retrieved memory
 
 Next work:
 
-- improve value-vector supervision
+- improve the action readout for retrieved memory
+- add task-family-specific diagnostics for standing orders, hidden colours, and expiry
 - add contrastive retrieval objectives
-- improve scope representation beyond flat one-off IDs
-- add oracle ablations for scope/value/slot
+- add stronger active-memory inspection/debug dumps
 - train the sequential memory controller more directly
 - keep hardening synthetic data so final prompts genuinely require memory
