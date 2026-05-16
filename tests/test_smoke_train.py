@@ -1,3 +1,5 @@
+import torch
+
 from hotbob.data.traces import generate_traces, write_jsonl
 from hotbob.training.train import main
 
@@ -26,4 +28,8 @@ def test_smoke_train_cli(tmp_path, monkeypatch) -> None:
         ],
     )
     main()
-    assert (tmp_path / "runs" / "latest.pt").exists()
+    checkpoint_path = tmp_path / "runs" / "latest.pt"
+    assert checkpoint_path.exists()
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    assert checkpoint["config"]["sequential_controller_loss"] is True
+    assert checkpoint["config"]["sequential_predicted_warmup_steps"] == 0

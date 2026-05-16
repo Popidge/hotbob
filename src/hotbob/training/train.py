@@ -14,6 +14,7 @@ from hotbob.model import MemoryBank
 from hotbob.model.stateful_transformer import StatefulTransformer
 from hotbob.training.dataset import (
     AUTHORITY_TO_ID,
+    OP_TO_ID,
     PRIVACY_TO_ID,
     TYPE_TO_ID,
     TraceDataset,
@@ -21,7 +22,125 @@ from hotbob.training.dataset import (
 )
 from hotbob.training.losses import contrastive_retrieval_loss
 from hotbob.training.memory_teacher import build_teacher_forced_memory, mean_value_embedding
-from hotbob.types import ActionLabel
+from hotbob.types import ActionLabel, MemoryOpName
+
+
+def clone_memory_for_forward(memory: MemoryBank) -> MemoryBank:
+    clone = MemoryBank(num_slots=memory.num_slots, d_model=memory.d_model, device=memory.device)
+    clone.reset(memory.occupied.shape[0])
+    clone.vectors = memory.vectors.clone()
+    clone.occupied = memory.occupied.clone()
+    clone.strength = memory.strength.clone()
+    clone.type_ids = memory.type_ids.clone()
+    clone.scope_ids = memory.scope_ids.clone()
+    clone.privacy_ids = memory.privacy_ids.clone()
+    clone.authority_ids = memory.authority_ids.clone()
+    return clone
+
+
+def apply_teacher_event_ops(
+    *,
+    memory: MemoryBank,
+    model: StatefulTransformer,
+    event_value_tokens: torch.Tensor,
+    event_value_mask: torch.Tensor,
+    op_ids: torch.Tensor,
+    slot_ids: torch.Tensor,
+    type_ids: torch.Tensor,
+    scope_ids: torch.Tensor,
+    privacy_ids: torch.Tensor,
+    authority_ids: torch.Tensor,
+    write_mask: torch.Tensor,
+) -> None:
+    if not bool(write_mask.any().item()):
+        return
+    value_vectors = mean_value_embedding(
+        model.transformer.embed,
+        event_value_tokens[write_mask],
+        event_value_mask[write_mask],
+    ).detach()
+    write_rows = torch.nonzero(write_mask, as_tuple=False).flatten()
+    for vector_idx, row_tensor in enumerate(write_rows):
+        row = int(row_tensor.item())
+        slot = int(slot_ids[row].item())
+        op_id = int(op_ids[row].item())
+        if op_id == OP_TO_ID[MemoryOpName.DELETE]:
+            memory.apply_delete(row, slot)
+        elif op_id == OP_TO_ID[MemoryOpName.UPDATE] and bool(memory.occupied[row, slot].item()):
+            memory.apply_update(row, slot, value_vectors[vector_idx])
+        else:
+            memory.apply_write(
+                row,
+                slot,
+                value_vectors[vector_idx],
+                type_id=int(type_ids[row].item()),
+                scope_id=int(scope_ids[row].item()),
+                privacy_id=int(privacy_ids[row].item()),
+                authority_id=int(authority_ids[row].item()),
+            )
+
+
+def sequential_controller_loss(
+    *,
+    model: StatefulTransformer,
+    batch: dict[str, torch.Tensor],
+    num_memory_slots: int,
+    d_model: int,
+    device: str,
+    ce: nn.CrossEntropyLoss,
+) -> torch.Tensor:
+    memory = MemoryBank(num_slots=num_memory_slots, d_model=d_model, device=device)
+    batch_size, max_events = batch["event_tokens"].shape[:2]
+    memory.reset(batch_size)
+    losses: list[torch.Tensor] = []
+    for event_idx in range(max_events):
+        event_mask = batch["event_mask"][:, event_idx]
+        if not bool(event_mask.any().item()):
+            continue
+        outputs = model(
+            batch["event_tokens"][:, event_idx],
+            clone_memory_for_forward(memory),
+            batch["event_scope_ids"][:, event_idx],
+            batch["event_lengths"][:, event_idx].clamp_min(1),
+        )
+        losses.append(
+            ce(
+                outputs["op_logits"][event_mask],
+                batch["event_op_ids"][:, event_idx][event_mask],
+            )
+        )
+        write_mask = batch["event_has_write"][:, event_idx] & event_mask
+        if bool(write_mask.any().item()):
+            for logit_key, target_key in [
+                ("slot_logits", "event_slot_ids"),
+                ("type_logits", "event_type_ids"),
+                ("scope_logits", "event_scope_ids"),
+                ("privacy_logits", "event_privacy_ids"),
+                ("authority_logits", "event_authority_ids"),
+                ("value_class_logits", "event_value_class_ids"),
+            ]:
+                losses.append(
+                    ce(
+                        outputs[logit_key][write_mask],
+                        batch[target_key][:, event_idx][write_mask],
+                    )
+                )
+        apply_teacher_event_ops(
+            memory=memory,
+            model=model,
+            event_value_tokens=batch["event_value_tokens"][:, event_idx],
+            event_value_mask=batch["event_value_mask"][:, event_idx],
+            op_ids=batch["event_op_ids"][:, event_idx],
+            slot_ids=batch["event_slot_ids"][:, event_idx],
+            type_ids=batch["event_type_ids"][:, event_idx],
+            scope_ids=batch["event_scope_ids"][:, event_idx],
+            privacy_ids=batch["event_privacy_ids"][:, event_idx],
+            authority_ids=batch["event_authority_ids"][:, event_idx],
+            write_mask=write_mask,
+        )
+    if not losses:
+        return torch.zeros((), device=device)
+    return torch.stack(losses).mean()
 
 
 def main() -> None:
@@ -32,6 +151,18 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--retrieval-contrastive-weight", type=float, default=0.25)
+    parser.add_argument(
+        "--sequential-controller-loss",
+        dest="sequential_controller_loss",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--no-sequential-controller-loss",
+        dest="sequential_controller_loss",
+        action="store_false",
+    )
+    parser.add_argument("--sequential-predicted-warmup-steps", type=int, default=0)
+    parser.set_defaults(sequential_controller_loss=True)
     args = parser.parse_args()
     traces = read_jsonl(args.traces)
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -141,6 +272,15 @@ def main() -> None:
                 logits = pred_norm @ target_norm.T / 0.1
                 labels = torch.arange(predicted_value.shape[0], device=device)
                 loss = loss + F.cross_entropy(logits, labels)
+        if args.sequential_controller_loss:
+            loss = loss + sequential_controller_loss(
+                model=model,
+                batch=batch,
+                num_memory_slots=num_memory_slots,
+                d_model=d_model,
+                device=device,
+                ce=ce,
+            )
         read_attn = outputs["read_attention"][
             torch.arange(batch["tokens"].shape[0], device=device),
             outputs["boundary_indices"],
@@ -184,6 +324,8 @@ def main() -> None:
             "max_seq_len": dataset.max_seq_len,
             "action_readout_type": "fusion_mlp",
             "retrieval_contrastive_weight": args.retrieval_contrastive_weight,
+            "sequential_controller_loss": args.sequential_controller_loss,
+            "sequential_predicted_warmup_steps": args.sequential_predicted_warmup_steps,
         },
     }
     torch.save(checkpoint, "runs/latest.pt")
