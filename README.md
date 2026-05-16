@@ -35,8 +35,11 @@ HotBob currently includes:
 - contrastive retrieval training objectives
 - active-memory debug dumps with private-value redaction
 - memory-controller, retrieval, diagnostics, and audit metrics
+- a first real-LLM adapter package for `Qwen/Qwen2.5-0.5B-Instruct`
 
 The model predicts categorical actions, not prose. This keeps failures visible.
+The Qwen path is different: it is a bolt-on adapter experiment that conditions
+decoder generation with a learned dense memory prefix.
 
 ## Architecture
 
@@ -75,6 +78,37 @@ The memory write controller predicts:
 
 The value class probe is an auditing surface: it helps inspect what a memory vector appears to encode without turning memory back into prompt text.
 
+## Qwen Memory Adapter
+
+`src/hotbob/llm` adds a phase-one real decoder integration around
+`Qwen/Qwen2.5-0.5B-Instruct`.
+
+This is intentionally conservative:
+
+- Qwen loads through `transformers`
+- base Qwen weights are frozen by default
+- memory values are not inserted into prompts
+- event text is encoded into dense hidden states
+- typed memory is stored in the existing `MemoryBank`
+- final generation can prepend a learned soft prefix derived from active scoped memory
+- CPU smoke tests are supported; useful fine-tuning may require a GPU
+
+This is not yet memory-native LLM training. It is a bolt-on adapter probe to test
+whether a pretrained decoder can consume scoped neural working memory without
+seeing the memory as text.
+
+On CUDA machines, the project pins `torch` to the PyTorch `cu128` wheel index
+through `uv`, so `uv run` should see the GPU when the NVIDIA driver is installed.
+
+For private or rate-limited Hugging Face downloads, create a local `.env` file:
+
+```text
+HF_TOKEN=your_hugging_face_token
+HUGGING_FACE_HUB_TOKEN=your_hugging_face_token
+```
+
+`.env` is gitignored and should not be committed.
+
 ## Evaluation
 
 Evaluation compares:
@@ -86,6 +120,9 @@ Evaluation compares:
 - sequential teacher-forced memory
 - sequential predicted memory
 - sequential predicted memory with oracle slot/scope/value ablations
+- Qwen context-only generation
+- Qwen teacher-forced memory-prefix generation
+- Qwen predicted-memory-prefix generation
 
 Metrics include:
 
@@ -145,6 +182,40 @@ Interpretation:
 
 For the larger goal, this is a useful inflection point. HotBob is now less a test of whether a neural working-memory layer can store and retrieve scoped facts, and more a test of how that memory should be represented, decoded, and consumed by an agent policy. That is the relevant bridge toward an agentic LLM: memory should not merely be recallable; it must become operational state that reliably conditions tool choice, refusal, prioritisation, and task execution.
 
+### Qwen Adapter Result
+
+A frozen `Qwen/Qwen2.5-0.5B-Instruct` run with the phase-one soft-prefix adapter
+was trained on 2,000 LLM traces for 2,000 steps and evaluated on 500 held-out
+LLM traces.
+
+```text
+context-only generation:          0.116
+teacher-forced memory generation: 0.932
+predicted-memory generation:      0.536
+secret leak failures:             0
+```
+
+Predicted-memory accuracy by family:
+
+```text
+expiry:          0.780
+hidden_colour:   0.660
+scope_isolation: 0.470
+symbol_binding:  0.420
+standing_order:  0.350
+```
+
+Interpretation:
+
+- the final prompt alone still underperforms, so the traces are not simply leaking answers
+- Qwen can consume dense scoped memory through the learned prefix path
+- the predicted write/value controller carries usable signal, though it remains below teacher-forced memory
+- standing-order policy use is still the hardest family
+
+This is positive evidence for the bolt-on version of the core hypothesis: a real
+pretrained decoder can use non-text neural working memory to change end-to-end
+generation.
+
 ## Commands
 
 Generate one trace file:
@@ -180,6 +251,37 @@ Evaluate:
 
 ```bash
 uv run python -m hotbob.training.evaluate --checkpoint runs/latest.pt --traces data/eval.jsonl
+```
+
+Generate LLM traces:
+
+```bash
+uv run python -m hotbob.llm.generate_data \
+  --train-out data/llm_train.jsonl \
+  --eval-out data/llm_eval.jsonl \
+  --train-n 10000 \
+  --eval-n 1000 \
+  --seed 3
+```
+
+Train a phase-one frozen-Qwen memory-prefix adapter:
+
+```bash
+uv run python -m hotbob.llm.train \
+  --model Qwen/Qwen2.5-0.5B-Instruct \
+  --traces data/llm_train.jsonl \
+  --steps 1000 \
+  --batch-size 1 \
+  --integration-mode prefix \
+  --freeze-base
+```
+
+Evaluate the LLM adapter modes:
+
+```bash
+uv run python -m hotbob.llm.evaluate \
+  --checkpoint runs/qwen_memory/latest.pt \
+  --traces data/llm_eval.jsonl
 ```
 
 ## Current Challenges
