@@ -35,8 +35,11 @@ HotBob currently includes:
 - contrastive retrieval training objectives
 - active-memory debug dumps with private-value redaction
 - memory-controller, retrieval, diagnostics, and audit metrics
+- a first real-LLM adapter package for `Qwen/Qwen2.5-0.5B-Instruct`
 
 The model predicts categorical actions, not prose. This keeps failures visible.
+The Qwen path is different: it is a bolt-on adapter experiment that conditions
+decoder generation with a learned dense memory prefix.
 
 ## Architecture
 
@@ -74,6 +77,25 @@ The memory write controller predicts:
 - write gate
 
 The value class probe is an auditing surface: it helps inspect what a memory vector appears to encode without turning memory back into prompt text.
+
+## Qwen Memory Adapter
+
+`src/hotbob/llm` adds a phase-one real decoder integration around
+`Qwen/Qwen2.5-0.5B-Instruct`.
+
+This is intentionally conservative:
+
+- Qwen loads through `transformers`
+- base Qwen weights are frozen by default
+- memory values are not inserted into prompts
+- event text is encoded into dense hidden states
+- typed memory is stored in the existing `MemoryBank`
+- final generation can prepend a learned soft prefix derived from active scoped memory
+- CPU smoke tests are supported; useful fine-tuning may require a GPU
+
+This is not yet memory-native LLM training. It is a bolt-on adapter probe to test
+whether a pretrained decoder can consume scoped neural working memory without
+seeing the memory as text.
 
 ## Evaluation
 
@@ -180,6 +202,37 @@ Evaluate:
 
 ```bash
 uv run python -m hotbob.training.evaluate --checkpoint runs/latest.pt --traces data/eval.jsonl
+```
+
+Generate LLM traces:
+
+```bash
+uv run python -m hotbob.llm.generate_data \
+  --train-out data/llm_train.jsonl \
+  --eval-out data/llm_eval.jsonl \
+  --train-n 10000 \
+  --eval-n 1000 \
+  --seed 3
+```
+
+Train a phase-one frozen-Qwen memory-prefix adapter:
+
+```bash
+uv run python -m hotbob.llm.train \
+  --model Qwen/Qwen2.5-0.5B-Instruct \
+  --traces data/llm_train.jsonl \
+  --steps 1000 \
+  --batch-size 1 \
+  --integration-mode prefix \
+  --freeze-base
+```
+
+Evaluate the LLM adapter modes:
+
+```bash
+uv run python -m hotbob.llm.evaluate \
+  --checkpoint runs/qwen_memory/latest.pt \
+  --traces data/llm_eval.jsonl
 ```
 
 ## Current Challenges
