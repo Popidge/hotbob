@@ -33,7 +33,7 @@ class StatefulTransformer(nn.Module):
             num_privacy=num_privacy,
             num_authority=num_authority,
         )
-        self.action_head = nn.Linear(d_model, action_vocab_size)
+        self.action_head = nn.Linear(d_model * 2, action_vocab_size)
 
     def forward(
         self,
@@ -50,8 +50,13 @@ class StatefulTransformer(nn.Module):
         last_indices = (lengths - 1).clamp_min(0)
         batch_indices = torch.arange(hidden.shape[0], device=hidden.device)
         boundary_hidden = hidden[batch_indices, last_indices]
+        boundary_read_attention = read_attention[batch_indices, last_indices]
+        memory_context = torch.bmm(boundary_read_attention.unsqueeze(1), memory.vectors).squeeze(1)
         outputs = self.memory_write(boundary_hidden)
-        outputs["action_logits"] = self.action_head(boundary_hidden)
+        outputs["action_logits"] = self.action_head(
+            torch.cat([boundary_hidden, memory_context], dim=-1)
+        )
         outputs["read_attention"] = read_attention
         outputs["boundary_indices"] = last_indices
+        outputs["memory_context"] = memory_context
         return outputs
