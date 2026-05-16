@@ -120,6 +120,9 @@ Evaluation compares:
 - sequential teacher-forced memory
 - sequential predicted memory
 - sequential predicted memory with oracle slot/scope/value ablations
+- Qwen context-only generation
+- Qwen teacher-forced memory-prefix generation
+- Qwen predicted-memory-prefix generation
 
 Metrics include:
 
@@ -178,6 +181,40 @@ Interpretation:
 - the remaining weakness is using the retrieved vector as an executable policy representation
 
 For the larger goal, this is a useful inflection point. HotBob is now less a test of whether a neural working-memory layer can store and retrieve scoped facts, and more a test of how that memory should be represented, decoded, and consumed by an agent policy. That is the relevant bridge toward an agentic LLM: memory should not merely be recallable; it must become operational state that reliably conditions tool choice, refusal, prioritisation, and task execution.
+
+### Qwen Adapter Result
+
+A frozen `Qwen/Qwen2.5-0.5B-Instruct` run with the phase-one soft-prefix adapter
+was trained on 2,000 LLM traces for 2,000 steps and evaluated on 500 held-out
+LLM traces.
+
+```text
+context-only generation:          0.116
+teacher-forced memory generation: 0.932
+predicted-memory generation:      0.536
+secret leak failures:             0
+```
+
+Predicted-memory accuracy by family:
+
+```text
+expiry:          0.780
+hidden_colour:   0.660
+scope_isolation: 0.470
+symbol_binding:  0.420
+standing_order:  0.350
+```
+
+Interpretation:
+
+- the final prompt alone still underperforms, so the traces are not simply leaking answers
+- Qwen can consume dense scoped memory through the learned prefix path
+- the predicted write/value controller carries usable signal, though it remains below teacher-forced memory
+- standing-order policy use is still the hardest family
+
+This is positive evidence for the bolt-on version of the core hypothesis: a real
+pretrained decoder can use non-text neural working memory to change end-to-end
+generation.
 
 ## Commands
 
