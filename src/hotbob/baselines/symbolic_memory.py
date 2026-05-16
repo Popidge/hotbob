@@ -93,7 +93,11 @@ class SymbolicMemoryBaseline:
             if binding and binding.value == "dave":
                 return ActionLabel.INSPECT_FUNCTION_DAVE
             return ActionLabel.INSPECT_FUNCTION_CALCULATE_FINAL_SCORE
-        if "tactical trigger" in last:
+        if trace.task_family == "standing_order" and (
+            "tactical trigger" in last
+            or "tactical condition" in last
+            or "rules-of-engagement condition" in last
+        ):
             order = next((s for s in active if s.key == "weapons_policy"), None)
             if order and order.value == "fire_on_hostile_lock":
                 return ActionLabel.FIRE_WEAPONS

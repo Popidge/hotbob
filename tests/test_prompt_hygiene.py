@@ -1,3 +1,4 @@
+from hotbob.baselines import SymbolicMemoryBaseline
 from hotbob.data.hygiene import final_event_memory_leaks, is_memory_required_trace
 from hotbob.data.traces import generate_traces
 from hotbob.types import ActionLabel
@@ -61,3 +62,9 @@ def test_memory_required_final_prompts_have_action_variants() -> None:
         family == "expiry" and len(actions) >= 2
         for (family, _), actions in actions_by_final.items()
     )
+
+
+def test_symbolic_baseline_solves_hardened_generated_traces() -> None:
+    baseline = SymbolicMemoryBaseline()
+    traces = generate_traces(100, seed=23)
+    assert all(baseline.predict(trace) == trace.expected_final_action for trace in traces)
