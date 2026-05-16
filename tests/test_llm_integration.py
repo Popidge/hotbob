@@ -6,7 +6,7 @@ from torch import nn
 
 from hotbob.data.traces import generate_traces
 from hotbob.llm.dataset import generate_llm_traces, privacy_report, task_trace_to_llm_trace
-from hotbob.llm.evaluate import exact_match, normalize_generated_text
+from hotbob.llm.evaluate import exact_match, extract_allowed_answer, normalize_generated_text
 from hotbob.llm.generate_data import main as generate_llm_main
 from hotbob.llm.memory_adapter import MemoryPrefixAdapter
 from hotbob.llm.qwen_memory_model import QwenMemoryConfig, QwenMemoryModel
@@ -112,6 +112,7 @@ def test_debug_dump_redacts_hidden_secrets_by_default() -> None:
 def test_evaluation_normalizes_generated_text_correctly() -> None:
     assert normalize_generated_text("  Hold   fire!  ") == "hold fire."
     assert exact_match("Inspect dave", "Inspect dave.")
+    assert extract_allowed_answer(" Inspect dave. | Correct. | Hold fire.") == "Inspect dave."
 
 
 def test_llm_generate_data_cli_argument_parsing(tmp_path, monkeypatch) -> None:

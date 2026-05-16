@@ -7,10 +7,17 @@ import torch
 from torch import nn
 
 from hotbob.llm.dataset import LLMTrace
+from hotbob.llm.env import load_dotenv
 from hotbob.llm.memory_adapter import LQwenMemoryHeads, apply_teacher_memory_op, scope_id
 from hotbob.model.memory_bank import MemoryBank
-from hotbob.training.dataset import build_scope_vocab
-from hotbob.types import MemoryPrivacy, TaskTrace
+from hotbob.training.dataset import (
+    AUTHORITY_TO_ID,
+    OP_TO_ID,
+    PRIVACY_TO_ID,
+    TYPE_TO_ID,
+    build_scope_vocab,
+)
+from hotbob.types import MemoryOpName, MemoryPrivacy, TaskTrace
 
 
 @dataclass
@@ -21,6 +28,8 @@ class QwenMemoryConfig:
     freeze_base: bool = True
     integration_mode: str = "prefix"
     num_value_classes: int = 64
+    device: str = "auto"
+    torch_dtype: str = "auto"
     scope_vocab: dict[str, int] = field(default_factory=lambda: {"default": 1})
 
 
@@ -51,6 +60,7 @@ class QwenMemoryModel(nn.Module):
             self.config_obj.num_value_classes,
             self.config_obj.memory_prefix_len,
         )
+        self.memory_heads.to(self._device())
         if self.config_obj.freeze_base:
             self.freeze_base()
 
@@ -59,13 +69,25 @@ class QwenMemoryModel(nn.Module):
         return cls(config)
 
     def _load_qwen_model(self) -> nn.Module:
+        load_dotenv()
         try:
             from transformers import AutoModelForCausalLM
         except ImportError as exc:
             raise RuntimeError("Install transformers to load Qwen models.") from exc
-        return AutoModelForCausalLM.from_pretrained(self.config_obj.model_name)
+        kwargs: dict[str, Any] = {}
+        if self.config_obj.torch_dtype != "auto":
+            kwargs["dtype"] = getattr(torch, self.config_obj.torch_dtype)
+        elif torch.cuda.is_available():
+            kwargs["dtype"] = torch.float16
+        model = AutoModelForCausalLM.from_pretrained(self.config_obj.model_name, **kwargs)
+        if self.config_obj.device == "auto":
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        else:
+            device = self.config_obj.device
+        return model.to(device)
 
     def _load_qwen_tokenizer(self) -> Any:
+        load_dotenv()
         try:
             from transformers import AutoTokenizer
         except ImportError as exc:
@@ -125,7 +147,8 @@ class QwenMemoryModel(nn.Module):
         scope: str | None = None,
         apply_predicted: bool = False,
     ) -> dict[str, torch.Tensor]:
-        boundary_hidden = self.encode_event(role, content, scope)
+        head_param = next(self.memory_heads.parameters())
+        boundary_hidden = self.encode_event(role, content, scope).to(dtype=head_param.dtype)
         outputs = self.memory_heads.writer(boundary_hidden)
         if apply_predicted:
             self.apply_memory_op(outputs)
@@ -156,7 +179,7 @@ class QwenMemoryModel(nn.Module):
     def apply_teacher_trace_memory(self, trace: LLMTrace) -> None:
         self.reset_memory(1)
         for idx, op in enumerate(trace.expected_memory_ops):
-            value_vector = self.encode_event("MEMORY_VALUE", op.value, op.scope)[0].detach()
+            value_vector = self.encode_event("MEMORY_VALUE", op.value, op.scope)[0].float().detach()
             apply_teacher_memory_op(
                 self.memory,
                 op,
@@ -170,7 +193,8 @@ class QwenMemoryModel(nn.Module):
         final_prompt: str,
         current_scope: str,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        query = self.encode_event("USER", final_prompt)
+        head_param = next(self.memory_heads.parameters())
+        query = self.encode_event("USER", final_prompt).to(dtype=head_param.dtype)
         scopes = torch.tensor(
             [scope_id(current_scope, self.config_obj.scope_vocab)],
             dtype=torch.long,
@@ -188,6 +212,7 @@ class QwenMemoryModel(nn.Module):
         embeds, mask = self._embed_text(final_prompt)
         if use_memory:
             prefix, _ = self.memory_prefix_for_prompt(final_prompt, current_scope)
+            prefix = prefix.to(dtype=embeds.dtype)
             embeds = torch.cat([prefix, embeds], dim=1)
             prefix_mask = torch.ones(
                 (mask.shape[0], prefix.shape[1]), dtype=mask.dtype, device=mask.device
@@ -204,6 +229,7 @@ class QwenMemoryModel(nn.Module):
         mask = full_encoded.get("attention_mask", torch.ones_like(input_ids))
         embeds = self.base_model.get_input_embeddings()(input_ids)
         prefix, _ = self.memory_prefix_for_prompt(trace.final_prompt, trace.current_scope)
+        prefix = prefix.to(dtype=embeds.dtype)
         embeds = torch.cat([prefix, embeds], dim=1)
         prefix_mask = torch.ones(
             (mask.shape[0], prefix.shape[1]), dtype=mask.dtype, device=mask.device
@@ -233,6 +259,66 @@ class QwenMemoryModel(nn.Module):
             ignore_index=-100,
         )
 
+    def write_supervision_loss(self, trace: LLMTrace) -> torch.Tensor:
+        losses: list[torch.Tensor] = []
+        op_index = 0
+        for event in trace.events:
+            outputs = self.forward_event(event.role, event.content, scope=event.scope)
+            next_op = (
+                trace.expected_memory_ops[op_index]
+                if op_index < len(trace.expected_memory_ops)
+                else None
+            )
+            target_op = (
+                next_op
+                if next_op is not None and (event.scope or trace.current_scope) == next_op.scope
+                else None
+            )
+            target_op_id = (
+                OP_TO_ID[target_op.op] if target_op is not None else OP_TO_ID[MemoryOpName.NOOP]
+            )
+            target = torch.tensor([target_op_id], dtype=torch.long, device=self._device())
+            losses.append(nn.functional.cross_entropy(outputs["op_logits"], target))
+            if target_op is None:
+                continue
+            target_type = torch.tensor(
+                [TYPE_TO_ID[target_op.type]], dtype=torch.long, device=self._device()
+            )
+            target_scope = torch.tensor(
+                [scope_id(target_op.scope, self.config_obj.scope_vocab)],
+                dtype=torch.long,
+                device=self._device(),
+            )
+            target_privacy = torch.tensor(
+                [PRIVACY_TO_ID[target_op.privacy]], dtype=torch.long, device=self._device()
+            )
+            target_authority = torch.tensor(
+                [AUTHORITY_TO_ID[target_op.authority]], dtype=torch.long, device=self._device()
+            )
+            target_slot = torch.tensor(
+                [min(op_index, self.config_obj.num_memory_slots - 1)],
+                dtype=torch.long,
+                device=self._device(),
+            )
+            losses.extend(
+                [
+                    nn.functional.cross_entropy(outputs["type_logits"], target_type),
+                    nn.functional.cross_entropy(outputs["scope_logits"], target_scope),
+                    nn.functional.cross_entropy(outputs["privacy_logits"], target_privacy),
+                    nn.functional.cross_entropy(outputs["authority_logits"], target_authority),
+                    nn.functional.cross_entropy(outputs["slot_logits"], target_slot),
+                ]
+            )
+            predicted_value = self.memory_heads.value_projector(outputs["value_vector"])[0]
+            target_value = self.encode_event(
+                "MEMORY_VALUE", target_op.value, target_op.scope
+            )[0].float()
+            losses.append(nn.functional.mse_loss(predicted_value, target_value))
+            op_index += 1
+        if not losses:
+            return torch.zeros((), device=self._device(), requires_grad=True)
+        return torch.stack(losses).mean()
+
     def generate_final(
         self,
         final_prompt: str,
@@ -244,6 +330,7 @@ class QwenMemoryModel(nn.Module):
         embeds, mask = self._embed_text(final_prompt)
         if use_memory:
             prefix, _ = self.memory_prefix_for_prompt(final_prompt, current_scope)
+            prefix = prefix.to(dtype=embeds.dtype)
             embeds = torch.cat([prefix, embeds], dim=1)
             mask = torch.cat(
                 [

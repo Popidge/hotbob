@@ -97,6 +97,18 @@ This is not yet memory-native LLM training. It is a bolt-on adapter probe to tes
 whether a pretrained decoder can consume scoped neural working memory without
 seeing the memory as text.
 
+On CUDA machines, the project pins `torch` to the PyTorch `cu128` wheel index
+through `uv`, so `uv run` should see the GPU when the NVIDIA driver is installed.
+
+For private or rate-limited Hugging Face downloads, create a local `.env` file:
+
+```text
+HF_TOKEN=your_hugging_face_token
+HUGGING_FACE_HUB_TOKEN=your_hugging_face_token
+```
+
+`.env` is gitignored and should not be committed.
+
 ## Evaluation
 
 Evaluation compares:

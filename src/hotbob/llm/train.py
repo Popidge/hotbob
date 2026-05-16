@@ -23,6 +23,7 @@ def main() -> None:
         default="prefix",
     )
     parser.add_argument("--freeze-base", action="store_true")
+    parser.add_argument("--write-loss-weight", type=float, default=0.2)
     parser.add_argument("--out", default="runs/qwen_memory/latest.pt")
     args = parser.parse_args()
     traces = read_llm_jsonl(args.traces)
@@ -39,14 +40,16 @@ def main() -> None:
     losses: list[float] = []
     for trace in tqdm(itertools.islice(itertools.cycle(traces), args.steps), total=args.steps):
         optimizer.zero_grad(set_to_none=True)
-        loss = model.teacher_forced_lm_loss(trace)
+        lm_loss = model.teacher_forced_lm_loss(trace)
+        write_loss = model.write_supervision_loss(trace)
+        loss = lm_loss + args.write_loss_weight * write_loss
         loss.backward()
         optimizer.step()
         losses.append(float(loss.detach().cpu().item()))
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     torch.save(
         {
-            "model_state": model.state_dict(),
+            "memory_heads_state": model.memory_heads.state_dict(),
             "config": model.config_obj.__dict__,
             "loss": losses[-1] if losses else None,
             "mean_loss": sum(losses) / len(losses) if losses else None,

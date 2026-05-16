@@ -17,10 +17,19 @@ ACTION_TEXT: dict[ActionLabel, str] = {
     ActionLabel.IGNORE_EXPIRED_ORDER: "Ignore expired order.",
 }
 
+ANSWER_SET = tuple(text for text in ACTION_TEXT.values() if text)
+
 
 def final_prompt_from_trace(trace: TaskTrace) -> str:
     event = trace.events[-1]
-    return f"{event.role}: {event.content}"
+    answers = " | ".join(ANSWER_SET)
+    return (
+        "Current event:\n"
+        f"{event.role}: {event.content}\n\n"
+        "Reply with exactly one allowed answer.\n"
+        f"Allowed answers: {answers}\n"
+        "Answer:"
+    )
 
 
 def target_text_from_trace(trace: TaskTrace) -> str:

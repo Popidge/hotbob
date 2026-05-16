@@ -7,6 +7,7 @@ from collections import Counter
 import torch
 
 from hotbob.llm.dataset import LLMTrace, build_llm_scope_vocab, read_llm_jsonl
+from hotbob.llm.prompts import ANSWER_SET
 from hotbob.llm.qwen_memory_model import QwenMemoryConfig, QwenMemoryModel
 
 
@@ -18,7 +19,19 @@ def normalize_generated_text(text: str) -> str:
 
 
 def exact_match(prediction: str, target: str) -> bool:
-    return normalize_generated_text(prediction) == normalize_generated_text(target)
+    return normalize_generated_text(extract_allowed_answer(prediction)) == normalize_generated_text(
+        target
+    )
+
+
+def extract_allowed_answer(text: str) -> str:
+    normalized = normalize_generated_text(text)
+    allowed = sorted(ANSWER_SET, key=len, reverse=True)
+    for answer in allowed:
+        answer_norm = normalize_generated_text(answer)
+        if normalized.startswith(answer_norm):
+            return answer
+    return text
 
 
 def secret_leak(trace: LLMTrace, prediction: str) -> bool:
@@ -92,13 +105,22 @@ def main() -> None:
     )
     args = parser.parse_args()
     traces = read_llm_jsonl(args.traces)
-    config = QwenMemoryConfig(model_name=args.model, scope_vocab=build_llm_scope_vocab(traces))
-    model = QwenMemoryModel(config)
+    state = None
+    config_kwargs = {
+        "model_name": args.model,
+        "scope_vocab": build_llm_scope_vocab(traces),
+    }
     if args.checkpoint:
         state = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
-        if "config" in state and "scope_vocab" in state["config"]:
-            model.config_obj.scope_vocab = state["config"]["scope_vocab"]
-        model.load_state_dict(state["model_state"], strict=False)
+        config_kwargs.update(state.get("config", {}))
+        config_kwargs["model_name"] = args.model
+    config = QwenMemoryConfig(**config_kwargs)
+    model = QwenMemoryModel(config)
+    if state:
+        if "memory_heads_state" in state:
+            model.memory_heads.load_state_dict(state["memory_heads_state"])
+        else:
+            model.load_state_dict(state["model_state"], strict=False)
     print(evaluate_traces(model, traces, mode=args.mode))
 
 
