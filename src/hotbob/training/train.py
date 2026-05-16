@@ -51,6 +51,7 @@ def main() -> None:
         num_scopes=max(dataset.scope_vocab.values()) + 1,
         num_privacy=len(PRIVACY_TO_ID),
         num_authority=len(AUTHORITY_TO_ID),
+        num_value_classes=max(dataset.value_vocab.values(), default=0) + 1,
         max_seq_len=dataset.max_seq_len,
     ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
@@ -118,6 +119,10 @@ def main() -> None:
                 event_outputs["authority_logits"][flat_write_mask],
                 batch["event_authority_ids"].flatten(0, 1)[flat_write_mask],
             )
+            loss = loss + ce(
+                event_outputs["value_class_logits"][flat_write_mask],
+                batch["event_value_class_ids"].flatten(0, 1)[flat_write_mask],
+            )
         if bool(flat_write_mask.any().item()):
             flat_event_value_tokens = batch["event_value_tokens"].flatten(0, 1)
             flat_event_value_mask = batch["event_value_mask"].flatten(0, 1)
@@ -153,6 +158,7 @@ def main() -> None:
         "model_state": model.state_dict(),
         "vocab": dataset.vocab.token_to_id,
         "scope_vocab": dataset.scope_vocab,
+        "value_vocab": dataset.value_vocab,
         "num_traces": len(traces),
         "steps": args.steps,
         "device": device,
@@ -161,6 +167,7 @@ def main() -> None:
             "d_model": d_model,
             "num_memory_slots": num_memory_slots,
             "action_vocab_size": len(ActionLabel),
+            "num_value_classes": max(dataset.value_vocab.values(), default=0) + 1,
             "max_seq_len": dataset.max_seq_len,
         },
     }

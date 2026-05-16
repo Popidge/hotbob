@@ -100,6 +100,11 @@ def build_scope_vocab(traces: Sequence[TaskTrace]) -> dict[str, int]:
     return {scope: idx + 1 for idx, scope in enumerate(scopes)}
 
 
+def build_value_vocab(traces: Sequence[TaskTrace]) -> dict[str, int]:
+    values = sorted({op.value for trace in traces for op in trace.expected_memory_ops})
+    return {value: idx + 1 for idx, value in enumerate(values)}
+
+
 @dataclass(frozen=True)
 class EncodedTrace:
     write_tokens: list[int]
@@ -111,6 +116,7 @@ class EncodedTrace:
     event_privacy_ids: list[int]
     event_authority_ids: list[int]
     event_slot_ids: list[int]
+    event_value_class_ids: list[int]
     event_has_write: list[bool]
     event_memory_value_tokens: list[list[int]]
     memory_value_tokens: list[int]
@@ -122,6 +128,7 @@ class EncodedTrace:
     privacy_id: int
     authority_id: int
     slot_id: int
+    value_class_id: int
 
 
 ACTION_TO_ID = {label: idx for idx, label in enumerate(ActionLabel)}
@@ -137,11 +144,13 @@ class TraceDataset(Dataset[EncodedTrace]):
         traces: list[TaskTrace],
         vocab: TraceVocab | None = None,
         scope_vocab: dict[str, int] | None = None,
+        value_vocab: dict[str, int] | None = None,
         max_seq_len: int = 256,
     ) -> None:
         self.traces = traces
         self.vocab = vocab or build_vocab(traces)
         self.scope_vocab = scope_vocab or build_scope_vocab(traces)
+        self.value_vocab = value_vocab or build_value_vocab(traces)
         self.max_seq_len = max_seq_len
 
     def __len__(self) -> int:
@@ -173,6 +182,7 @@ class TraceDataset(Dataset[EncodedTrace]):
             event_privacy_ids=event_targets["privacy_ids"],
             event_authority_ids=event_targets["authority_ids"],
             event_slot_ids=event_targets["slot_ids"],
+            event_value_class_ids=event_targets["value_class_ids"],
             event_has_write=event_targets["has_write"],
             event_memory_value_tokens=event_targets["memory_value_tokens"],
             memory_value_tokens=memory_value_tokens,
@@ -184,6 +194,7 @@ class TraceDataset(Dataset[EncodedTrace]):
             privacy_id=PRIVACY_TO_ID[first_op.privacy],
             authority_id=AUTHORITY_TO_ID[first_op.authority],
             slot_id=0,
+            value_class_id=self.value_vocab.get(first_op.value, 0),
         )
 
     def _encode_event(self, event, current_scope: str) -> list[int]:
@@ -208,6 +219,7 @@ class TraceDataset(Dataset[EncodedTrace]):
         privacy_ids: list[int] = []
         authority_ids: list[int] = []
         slot_ids: list[int] = []
+        value_class_ids: list[int] = []
         has_write: list[bool] = []
         memory_value_tokens: list[list[int]] = []
         op_index = 0
@@ -226,6 +238,7 @@ class TraceDataset(Dataset[EncodedTrace]):
                 privacy_ids.append(PRIVACY_TO_ID[target_op.privacy])
                 authority_ids.append(AUTHORITY_TO_ID[target_op.authority])
                 slot_ids.append(min(op_index, 31))
+                value_class_ids.append(self.value_vocab.get(target_op.value, 0))
                 has_write.append(True)
                 memory_value_tokens.append(self.vocab.encode(tokenize_text(target_op.value)))
                 op_index += 1
@@ -238,6 +251,7 @@ class TraceDataset(Dataset[EncodedTrace]):
                 privacy_ids.append(PRIVACY_TO_ID[default_op.privacy])
                 authority_ids.append(AUTHORITY_TO_ID[default_op.authority])
                 slot_ids.append(0)
+                value_class_ids.append(0)
                 has_write.append(False)
                 memory_value_tokens.append([0])
         return {
@@ -248,6 +262,7 @@ class TraceDataset(Dataset[EncodedTrace]):
             "privacy_ids": privacy_ids,
             "authority_ids": authority_ids,
             "slot_ids": slot_ids,
+            "value_class_ids": value_class_ids,
             "has_write": has_write,
             "memory_value_tokens": memory_value_tokens,
         }
@@ -309,6 +324,7 @@ def collate_traces(batch: Sequence[EncodedTrace]) -> dict[str, torch.Tensor]:
         "event_privacy_ids": _pad_event_labels(batch, "event_privacy_ids", max_events),
         "event_authority_ids": _pad_event_labels(batch, "event_authority_ids", max_events),
         "event_slot_ids": _pad_event_labels(batch, "event_slot_ids", max_events),
+        "event_value_class_ids": _pad_event_labels(batch, "event_value_class_ids", max_events),
         "event_has_write": _pad_event_bools(batch, "event_has_write", max_events),
         "current_scope_ids": torch.tensor(
             [item.current_scope_id for item in batch], dtype=torch.long
@@ -320,6 +336,7 @@ def collate_traces(batch: Sequence[EncodedTrace]) -> dict[str, torch.Tensor]:
         "privacy_ids": torch.tensor([item.privacy_id for item in batch], dtype=torch.long),
         "authority_ids": torch.tensor([item.authority_id for item in batch], dtype=torch.long),
         "slot_ids": torch.tensor([item.slot_id for item in batch], dtype=torch.long),
+        "value_class_ids": torch.tensor([item.value_class_id for item in batch], dtype=torch.long),
     }
 
 

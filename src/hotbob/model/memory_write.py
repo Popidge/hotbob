@@ -15,6 +15,7 @@ class MemoryWrite(nn.Module):
         num_scopes: int,
         num_privacy: int,
         num_authority: int,
+        num_value_classes: int = 1,
     ) -> None:
         super().__init__()
         self.op_head = nn.Linear(d_model, 4)
@@ -23,6 +24,7 @@ class MemoryWrite(nn.Module):
         self.scope_head = nn.Linear(d_model, num_scopes)
         self.privacy_head = nn.Linear(d_model, num_privacy)
         self.authority_head = nn.Linear(d_model, num_authority)
+        self.value_class_head = nn.Linear(d_model, num_value_classes)
         self.value_head = nn.Linear(d_model, d_model)
         self.gate_head = nn.Linear(d_model, 1)
 
@@ -34,6 +36,7 @@ class MemoryWrite(nn.Module):
             "scope_logits": self.scope_head(boundary_hidden),
             "privacy_logits": self.privacy_head(boundary_hidden),
             "authority_logits": self.authority_head(boundary_hidden),
+            "value_class_logits": self.value_class_head(boundary_hidden),
             "value_vector": self.value_head(boundary_hidden),
             "write_gate": torch.sigmoid(self.gate_head(boundary_hidden)),
         }

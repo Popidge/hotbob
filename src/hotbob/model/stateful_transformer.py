@@ -20,6 +20,7 @@ class StatefulTransformer(nn.Module):
         num_scopes: int = 64,
         num_privacy: int = 3,
         num_authority: int = 4,
+        num_value_classes: int = 1,
         max_seq_len: int = 256,
     ) -> None:
         super().__init__()
@@ -32,6 +33,7 @@ class StatefulTransformer(nn.Module):
             num_scopes=num_scopes,
             num_privacy=num_privacy,
             num_authority=num_authority,
+            num_value_classes=num_value_classes,
         )
         self.action_head = nn.Linear(d_model * 2, action_vocab_size)
 

@@ -160,6 +160,7 @@ def evaluate_neural(
         traces,
         vocab=vocab,
         scope_vocab=checkpoint["scope_vocab"],
+        value_vocab=checkpoint.get("value_vocab"),
     )
     config = checkpoint["config"]
     model = StatefulTransformer(
@@ -171,6 +172,7 @@ def evaluate_neural(
         num_scopes=max(dataset.scope_vocab.values()) + 1,
         num_privacy=len(PRIVACY_TO_ID),
         num_authority=len(AUTHORITY_TO_ID),
+        num_value_classes=config.get("num_value_classes", 1),
         max_seq_len=config.get("max_seq_len", 256),
     ).to(device)
     model.load_state_dict(checkpoint["model_state"])
@@ -206,6 +208,7 @@ def evaluate_neural(
                 "scope": ("scope_logits", "scope_ids"),
                 "privacy": ("privacy_logits", "privacy_ids"),
                 "authority": ("authority_logits", "authority_ids"),
+                "value_class": ("value_class_logits", "value_class_ids"),
             }
             for name, (logit_key, target_key) in write_targets.items():
                 write_totals[name] += batch[target_key].numel()
@@ -301,6 +304,7 @@ def load_model_and_dataset(
         traces,
         vocab=vocab,
         scope_vocab=checkpoint["scope_vocab"],
+        value_vocab=checkpoint.get("value_vocab"),
     )
     config = checkpoint["config"]
     model = StatefulTransformer(
@@ -312,6 +316,7 @@ def load_model_and_dataset(
         num_scopes=max(dataset.scope_vocab.values()) + 1,
         num_privacy=len(PRIVACY_TO_ID),
         num_authority=len(AUTHORITY_TO_ID),
+        num_value_classes=config.get("num_value_classes", 1),
         max_seq_len=config.get("max_seq_len", 256),
     ).to(device)
     model.load_state_dict(checkpoint["model_state"])
@@ -517,6 +522,10 @@ def evaluate_sequential_neural(
                         ),
                         "privacy": ("privacy_logits", PRIVACY_TO_ID[target_op.privacy]),
                         "authority": ("authority_logits", AUTHORITY_TO_ID[target_op.authority]),
+                        "value_class": (
+                            "value_class_logits",
+                            dataset.value_vocab.get(target_op.value, 0),
+                        ),
                     }
                     for name, (logit_key, target_id) in write_targets.items():
                         write_totals[name] += 1
