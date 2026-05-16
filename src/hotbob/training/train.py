@@ -19,6 +19,7 @@ from hotbob.training.dataset import (
     TraceDataset,
     collate_traces,
 )
+from hotbob.training.losses import contrastive_retrieval_loss
 from hotbob.training.memory_teacher import build_teacher_forced_memory, mean_value_embedding
 from hotbob.types import ActionLabel
 
@@ -30,6 +31,7 @@ def main() -> None:
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--lr", type=float, default=3e-4)
+    parser.add_argument("--retrieval-contrastive-weight", type=float, default=0.25)
     args = parser.parse_args()
     traces = read_jsonl(args.traces)
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -145,6 +147,17 @@ def main() -> None:
             batch["slot_ids"],
         ]
         loss = loss - 0.1 * torch.log(read_attn.clamp_min(1e-6)).mean()
+        if batch["tokens"].shape[0] > 1 and args.retrieval_contrastive_weight > 0:
+            target_value = mean_value_embedding(
+                model.transformer.embed,
+                batch["memory_value_tokens"],
+                batch["memory_value_mask"],
+            ).detach()
+            loss = loss + args.retrieval_contrastive_weight * contrastive_retrieval_loss(
+                outputs["memory_context"],
+                target_value,
+                target_value,
+            )
 
         optimizer.zero_grad()
         loss.backward()
@@ -170,6 +183,7 @@ def main() -> None:
             "num_value_classes": max(dataset.value_vocab.values(), default=0) + 1,
             "max_seq_len": dataset.max_seq_len,
             "action_readout_type": "fusion_mlp",
+            "retrieval_contrastive_weight": args.retrieval_contrastive_weight,
         },
     }
     torch.save(checkpoint, "runs/latest.pt")
