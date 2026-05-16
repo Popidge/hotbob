@@ -169,6 +169,7 @@ def main() -> None:
             "action_vocab_size": len(ActionLabel),
             "num_value_classes": max(dataset.value_vocab.values(), default=0) + 1,
             "max_seq_len": dataset.max_seq_len,
+            "action_readout_type": "fusion_mlp",
         },
     }
     torch.save(checkpoint, "runs/latest.pt")

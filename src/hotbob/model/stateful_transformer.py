@@ -3,6 +3,7 @@ from __future__ import annotations
 import torch
 from torch import nn
 
+from hotbob.model.action_readout import ActionReadout
 from hotbob.model.memory_bank import MemoryBank
 from hotbob.model.memory_read import MemoryRead
 from hotbob.model.memory_write import MemoryWrite
@@ -35,7 +36,7 @@ class StatefulTransformer(nn.Module):
             num_authority=num_authority,
             num_value_classes=num_value_classes,
         )
-        self.action_head = nn.Linear(d_model * 2, action_vocab_size)
+        self.action_readout = ActionReadout(d_model, action_vocab_size)
 
     def forward(
         self,
@@ -55,9 +56,9 @@ class StatefulTransformer(nn.Module):
         boundary_read_attention = read_attention[batch_indices, last_indices]
         memory_context = torch.bmm(boundary_read_attention.unsqueeze(1), memory.vectors).squeeze(1)
         outputs = self.memory_write(boundary_hidden)
-        outputs["action_logits"] = self.action_head(
-            torch.cat([boundary_hidden, memory_context], dim=-1)
-        )
+        action_logits, action_features = self.action_readout(boundary_hidden, memory_context)
+        outputs["action_logits"] = action_logits
+        outputs["action_features"] = action_features
         outputs["read_attention"] = read_attention
         outputs["boundary_indices"] = last_indices
         outputs["memory_context"] = memory_context
