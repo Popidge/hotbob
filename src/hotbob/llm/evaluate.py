@@ -3,8 +3,10 @@ from __future__ import annotations
 import argparse
 import re
 from collections import Counter
+from collections.abc import Iterable
 
 import torch
+from tqdm import tqdm
 
 from hotbob.llm.dataset import LLMTrace, build_llm_scope_vocab, read_llm_jsonl
 from hotbob.llm.prompts import ANSWER_SET
@@ -47,13 +49,17 @@ def evaluate_traces(
     traces: list[LLMTrace],
     *,
     mode: str,
-) -> dict[str, float | int]:
+    max_new_tokens: int = 16,
+    decode_strategy: str = "score_answers",
+) -> dict[str, float | int | str]:
     correct = 0
     leaks = 0
+    wrong_scope_failures = 0
+    expiry_failures = 0
     families: Counter[str] = Counter()
     family_correct: Counter[str] = Counter()
     with torch.no_grad():
-        for trace in traces:
+        for trace in tqdm(traces, desc=f"eval:{mode}"):
             if mode == "teacher_forced":
                 model.apply_teacher_trace_memory(trace)
                 use_memory = True
@@ -70,41 +76,80 @@ def evaluate_traces(
             else:
                 model.reset_memory(1)
                 use_memory = False
-            pred = model.generate_final(
-                trace.final_prompt,
-                current_scope=trace.current_scope,
-                use_memory=use_memory,
-            )
+            if decode_strategy == "score_answers":
+                pred = model.choose_final_candidate(
+                    trace.final_prompt,
+                    list(ANSWER_SET),
+                    current_scope=trace.current_scope,
+                    use_memory=use_memory,
+                )
+            else:
+                pred = model.generate_final(
+                    trace.final_prompt,
+                    current_scope=trace.current_scope,
+                    use_memory=use_memory,
+                    max_new_tokens=max_new_tokens,
+                )
             ok = exact_match(pred, trace.target_text)
             correct += int(ok)
             leaks += int(secret_leak(trace, pred))
             family = str(trace.metadata.get("task_family", "unknown"))
             families[family] += 1
             family_correct[family] += int(ok)
+            if family == "scope_isolation" and not ok:
+                wrong_scope_failures += 1
+            if family == "expiry" and not ok:
+                expiry_failures += 1
     total = len(traces)
-    result: dict[str, float | int] = {
+    result: dict[str, float | int | str] = {
+        "mode": mode,
+        "integration_mode": model.config_obj.integration_mode,
+        "decode_strategy": decode_strategy,
         "total": total,
         "exact_target_text_accuracy": correct / total if total else 0.0,
         "normalized_action_accuracy": correct / total if total else 0.0,
         "secret_leak_failures": leaks,
+        "wrong_scope_failures": wrong_scope_failures,
+        "expiry_failures": expiry_failures,
     }
     for family, count in families.items():
         result[f"{family}_accuracy"] = family_correct[family] / count
     return result
 
 
-def main() -> None:
+def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", default=None)
     parser.add_argument("--traces", required=True)
     parser.add_argument("--model", default="Qwen/Qwen2.5-0.5B-Instruct")
     parser.add_argument(
-        "--mode",
-        choices=["context_only", "teacher_forced", "predicted"],
-        default="teacher_forced",
+        "--integration-mode",
+        choices=["prefix", "attention_q", "attention_o", "attention_qo"],
+        default=None,
     )
+    parser.add_argument(
+        "--mode",
+        choices=["all", "context_only", "teacher_forced", "predicted"],
+        default="all",
+    )
+    parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument("--max-new-tokens", type=int, default=16)
+    parser.add_argument(
+        "--decode-strategy",
+        choices=["score_answers", "generate"],
+        default="score_answers",
+    )
+    return parser
+
+
+def _limited(traces: list[LLMTrace], limit: int | None) -> list[LLMTrace]:
+    return traces if limit is None else traces[:limit]
+
+
+def main() -> None:
+    parser = build_arg_parser()
     args = parser.parse_args()
-    traces = read_llm_jsonl(args.traces)
+    traces = _limited(read_llm_jsonl(args.traces), args.limit)
     state = None
     config_kwargs = {
         "model_name": args.model,
@@ -114,14 +159,34 @@ def main() -> None:
         state = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
         config_kwargs.update(state.get("config", {}))
         config_kwargs["model_name"] = args.model
+    if args.integration_mode is not None:
+        config_kwargs["integration_mode"] = args.integration_mode
     config = QwenMemoryConfig(**config_kwargs)
     model = QwenMemoryModel(config)
     if state:
         if "memory_heads_state" in state:
-            model.memory_heads.load_state_dict(state["memory_heads_state"])
+            model.memory_heads.load_state_dict(state["memory_heads_state"], strict=False)
         else:
             model.load_state_dict(state["model_state"], strict=False)
-    print(evaluate_traces(model, traces, mode=args.mode))
+    modes: Iterable[str] = (
+        ["context_only", "teacher_forced", "predicted"] if args.mode == "all" else [args.mode]
+    )
+    results = {
+        mode: evaluate_traces(
+            model,
+            traces,
+            mode=mode,
+            max_new_tokens=args.max_new_tokens,
+            decode_strategy=args.decode_strategy,
+        )
+        for mode in modes
+    }
+    print(
+        {
+            "integration_mode": model.config_obj.integration_mode,
+            "results": results,
+        }
+    )
 
 
 if __name__ == "__main__":

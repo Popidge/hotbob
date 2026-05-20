@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from enum import StrEnum
+
 import torch
 from torch import nn
 
@@ -13,6 +15,11 @@ from hotbob.training.dataset import (
     normalize_scope,
 )
 from hotbob.types import MemoryOp, MemoryOpName
+
+
+class MemoryStateMode(StrEnum):
+    SHARED = "shared"
+    BY_TYPE = "by_type"
 
 
 class MemoryPrefixAdapter(nn.Module):
@@ -39,6 +46,134 @@ class MemoryPrefixAdapter(nn.Module):
         return prefix, attention[:, 0]
 
 
+class LowRankMemoryCorrectionAdapter(nn.Module):
+    """Memory-conditioned residual q/o correction over decoder hidden states.
+
+    This is the first delta-HotBob integration path. It is intentionally shaped
+    like q/o low-rank correction while staying outside Qwen attention internals:
+    q-side correction is added to token inputs before the frozen decoder, and
+    o-side correction is added to decoder hidden states before the LM head.
+    """
+
+    def __init__(
+        self,
+        hidden_size: int,
+        *,
+        rank: int = 16,
+        num_types: int,
+        num_scopes: int,
+        num_privacy: int,
+        num_authority: int,
+        state_mode: MemoryStateMode | str = MemoryStateMode.SHARED,
+    ) -> None:
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.rank = min(rank, hidden_size)
+        self.state_mode = MemoryStateMode(state_mode)
+        self.type_embedding = nn.Embedding(num_types, hidden_size)
+        self.scope_embedding = nn.Embedding(num_scopes, hidden_size)
+        self.privacy_embedding = nn.Embedding(num_privacy, hidden_size)
+        self.authority_embedding = nn.Embedding(num_authority, hidden_size)
+        self.read = MemoryRead(hidden_size)
+        self.q_down = nn.Linear(hidden_size, self.rank, bias=False)
+        self.q_up = nn.Linear(self.rank, hidden_size, bias=False)
+        self.o_down = nn.Linear(hidden_size, self.rank, bias=False)
+        self.o_up = nn.Linear(self.rank, hidden_size, bias=False)
+        self.q_gate = nn.Parameter(torch.tensor(0.1))
+        self.o_gate = nn.Parameter(torch.tensor(0.1))
+
+    def _enriched_memory(self, memory: MemoryBank) -> MemoryBank:
+        enriched = memory.clone_empty_like()
+        type_ids = memory.type_ids.clamp(0, self.type_embedding.num_embeddings - 1)
+        scope_ids = memory.scope_ids.clamp(0, self.scope_embedding.num_embeddings - 1)
+        privacy_ids = memory.privacy_ids.clamp(0, self.privacy_embedding.num_embeddings - 1)
+        authority_ids = memory.authority_ids.clamp(0, self.authority_embedding.num_embeddings - 1)
+        enriched.vectors = (
+            memory.vectors
+            + self.type_embedding(type_ids)
+            + self.scope_embedding(scope_ids)
+            + self.privacy_embedding(privacy_ids)
+            + self.authority_embedding(authority_ids)
+        )
+        enriched.occupied = memory.occupied
+        enriched.strength = memory.strength
+        enriched.type_ids = memory.type_ids
+        enriched.scope_ids = memory.scope_ids
+        enriched.privacy_ids = memory.privacy_ids
+        enriched.authority_ids = memory.authority_ids
+        return enriched
+
+    def _typed_grouped_memory(
+        self, memory: MemoryBank, current_scope_ids: torch.Tensor
+    ) -> MemoryBank:
+        active = memory.active_mask(current_scope_ids)
+        num_types = self.type_embedding.num_embeddings
+        grouped = MemoryBank(num_types, memory.d_model, device=memory.device)
+        grouped.reset(memory.vectors.shape[0])
+        grouped.type_ids = torch.arange(num_types, device=memory.device).unsqueeze(0).expand_as(
+            grouped.type_ids
+        )
+        grouped.scope_ids = current_scope_ids.to(memory.device).unsqueeze(-1).expand_as(
+            grouped.scope_ids
+        )
+        for type_id in range(num_types):
+            type_mask = active & (memory.type_ids == type_id)
+            weights = torch.where(type_mask, memory.strength, torch.zeros_like(memory.strength))
+            denom = weights.sum(dim=1, keepdim=True).clamp_min(1e-6)
+            grouped.vectors[:, type_id] = (memory.vectors * weights.unsqueeze(-1)).sum(
+                dim=1
+            ) / denom
+            grouped.strength[:, type_id] = weights.sum(dim=1).clamp_max(1.0)
+            grouped.occupied[:, type_id] = type_mask.any(dim=1)
+            grouped.privacy_ids[:, type_id] = torch.where(
+                type_mask,
+                memory.privacy_ids,
+                torch.zeros_like(memory.privacy_ids),
+            ).amax(dim=1)
+            grouped.authority_ids[:, type_id] = torch.where(
+                type_mask,
+                memory.authority_ids,
+                torch.zeros_like(memory.authority_ids),
+            ).amax(dim=1)
+        return grouped
+
+    def _readout(
+        self,
+        hidden: torch.Tensor,
+        memory: MemoryBank,
+        current_scope_ids: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        source = (
+            self._typed_grouped_memory(memory, current_scope_ids)
+            if self.state_mode == MemoryStateMode.BY_TYPE
+            else memory
+        )
+        enriched = self._enriched_memory(source)
+        read_hidden, attention = self.read(hidden, enriched, current_scope_ids)
+        has_active = source.active_mask(current_scope_ids).any(dim=-1).view(hidden.shape[0], 1, 1)
+        readout = torch.where(has_active, read_hidden - hidden, torch.zeros_like(hidden))
+        return readout, attention
+
+    def forward(
+        self,
+        hidden: torch.Tensor,
+        memory: MemoryBank,
+        current_scope_ids: torch.Tensor,
+        *,
+        apply_q: bool,
+        apply_o: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+        q_attention = None
+        o_attention = None
+        if apply_q:
+            readout, q_attention = self._readout(hidden, memory, current_scope_ids)
+            hidden = hidden + self.q_gate.to(hidden.dtype) * self.q_up(self.q_down(readout))
+        if apply_o:
+            readout, o_attention = self._readout(hidden, memory, current_scope_ids)
+            hidden = hidden + self.o_gate.to(hidden.dtype) * self.o_up(self.o_down(readout))
+        return hidden, q_attention, o_attention
+
+
 class LQwenMemoryHeads(nn.Module):
     """Trainable memory heads around a frozen decoder hidden state."""
 
@@ -49,6 +184,8 @@ class LQwenMemoryHeads(nn.Module):
         num_scopes: int,
         num_value_classes: int,
         memory_prefix_len: int = 4,
+        correction_rank: int = 16,
+        memory_state_mode: MemoryStateMode | str = MemoryStateMode.SHARED,
     ) -> None:
         super().__init__()
         self.writer = MemoryWrite(
@@ -62,6 +199,15 @@ class LQwenMemoryHeads(nn.Module):
         )
         self.value_projector = nn.Linear(hidden_size, hidden_size)
         self.prefix = MemoryPrefixAdapter(hidden_size, memory_prefix_len)
+        self.correction = LowRankMemoryCorrectionAdapter(
+            hidden_size,
+            rank=correction_rank,
+            num_types=len(TYPE_TO_ID),
+            num_scopes=num_scopes,
+            num_privacy=len(PRIVACY_TO_ID),
+            num_authority=len(AUTHORITY_TO_ID),
+            state_mode=memory_state_mode,
+        )
 
 
 def scope_id(scope: str, scope_vocab: dict[str, int]) -> int:

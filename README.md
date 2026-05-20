@@ -1,249 +1,193 @@
 # HotBob
 
-HotBob is a small research prototype for a **Scoped Typed Working Memory Transformer**.
+HotBob is a research prototype for **scoped, typed neural working memory** in
+agentic model loops.
 
-Central claim:
+The core claim is narrow:
 
-> Prompt context is a poor substrate for task-local operational state. HotBob tests whether a scoped, typed neural working-memory layer can preserve and retrieve operational facts across task boundaries without representing that memory only as prompt text.
+> Prompt context is a poor substrate for task-local operational state. HotBob
+> tests whether small scoped, typed memory objects can preserve operational facts
+> across task boundaries and directly condition policy, action, tool choice, and
+> generation without representing that memory only as prompt text.
 
-This is not a production LLM. It is a compact lab for testing whether a transformer-like model can store task-local facts in neural memory slots, retrieve them later as activations, and make action decisions when the answer is no longer present in the prompt.
+HotBob is not a production LLM and it is not a generic long-context replacement.
+It is a compact lab for asking how memory should be written, scoped, audited,
+retrieved, and consumed in the hot inference path.
 
 ## Why The Name?
 
-When you ask an LLM-powered agent to do a task, it is stateless. It is like asking it to work with Bob today. However, every time it talks to Bob, it has mysteriously forgotten everything about Bob and what it has worked on. It must reread the "Book of Bob" before every interaction to remind itself who Bob is, what he does, and what has happened so far.
+When an LLM-powered agent is stateless, it has to reread the "Book of Bob" before
+every interaction. HotBob is the working title for giving the model a hot working
+memory of its Bob: operational state that is immediately available during
+inference instead of being reconstructed only from prompt history.
 
-HotBob aims to give the model a genuine **hot working memory** of its Bob: memory deeply integrated into the neural architecture and readily available as part of inference, so it no longer has to recover operational state only by rereading prompt text.
+## Research Lane
 
-It is a working title. No further questions.
+HotBob memory objects are deliberately small and governed. A memory is not just a
+blob of old text. It has:
 
-## License And Contributions
+- type
+- scope
+- privacy
+- authority
+- lifecycle/expiry
+- active/inactive state
+- strength
+- operational effect on action or generation
 
-HotBob is licensed under the Apache License 2.0. That choice is intentional:
-it matches the Qwen model family used by the real-LLM adapter and keeps this
-experiment easy to fork, port, cite, extend, or repurpose.
-
-Contributions and derived work are welcome. Useful contributions include:
-
-- reproductions on other hardware, models, trace families, or longer runs
-- ports to other decoder models or memory injection mechanisms
-- better write controllers, value encoders, retrieval losses, or evaluators
-- negative results and ablations that clarify where this approach fails
-- docs, examples, bug fixes, cleanup, and smaller onboarding improvements
-
-If you build on this, you do not need permission. Fork it, publish your results,
-open issues, send PRs, or take the ideas into a different codebase. The goal is
-to make neural working-memory experiments easier for anyone exploring the same
-problem space.
+This makes HotBob different from broad long-context memory projects. The target
+is working memory for agent behavior: scoped project state, standing orders,
+private facts, expiry, authority conflicts, tool routing, and refusal/disclosure
+decisions.
 
 ## What Exists
 
-HotBob currently includes:
+The repo currently includes two experimental tracks.
 
-- hygienic synthetic task traces for secrets, symbol bindings, standing orders, scope isolation, and expiry
+The compact synthetic-controller path includes:
+
+- hygienic synthetic traces for secrets, symbol bindings, standing orders, scope
+  isolation, and expiry
 - typed memory operations: `WRITE`, `UPDATE`, `DELETE`, `NOOP`
-- memory metadata: type, scope, privacy, authority, slot, strength
-- a symbolic oracle baseline
-- a tensor `MemoryBank`
+- tensor `MemoryBank` storage with vectors, occupied flags, strength, type,
+  scope, privacy, and authority
 - learned `MemoryRead` cross-attention over memory slots
-- learned `MemoryWrite` heads for write decisions, metadata, value vectors, and value-class probes
-- an explicit action readout that fuses prompt state, retrieved memory context, interaction features, and distance features
-- sequential event evaluation
-- sequential memory-controller training
-- prompt hygiene tests
-- held-out train/eval generation
-- contrastive retrieval training objectives
-- active-memory debug dumps with private-value redaction
-- memory-controller, retrieval, diagnostics, and audit metrics
-- a first real-LLM adapter package for `Qwen/Qwen2.5-0.5B-Instruct`
+- learned `MemoryWrite` heads for operation, slot, metadata, value vector, and
+  value-class probes
+- explicit action readout over prompt state, retrieved memory context,
+  interaction features, and distance features
+- sequential teacher-forced and predicted-memory evaluation
+- contrastive retrieval objectives
+- active-memory JSONL debug dumps with private-value redaction
+- symbolic oracle, context-only, and neural memory baselines
 
-The model predicts categorical actions, not prose. This keeps failures visible.
-The Qwen path is different: it is a bolt-on adapter experiment that conditions
-decoder generation with a learned dense memory prefix.
+The real-LLM path in `src/hotbob/llm` wraps `Qwen/Qwen2.5-0.5B-Instruct` and
+keeps the base decoder frozen by default. It supports:
 
-## Architecture
+- `prefix`: learned soft-prefix conditioning from active HotBob memory
+- `attention_q`: low-rank query-side memory correction
+- `attention_o`: low-rank output-side memory correction
+- `attention_qo`: combined query/output correction
+- `shared` memory readout state
+- `by_type` scaffolding for typed multi-state memory readout
+- context-only, teacher-forced memory, and predicted-memory evaluation modes
+- score-based closed-set evaluation by default, with autoregressive generation
+  still available
 
-The core loop is:
+Memory values are not inserted into the prompt. The LLM adapter consumes
+`MemoryBank` tensors and metadata.
 
-1. Events arrive one at a time.
-2. Boundary events may trigger a memory write/update/delete.
-3. Memory is stored as typed tensor slots, not appended prose.
-4. Later action events are evaluated with only the final event text plus neural memory.
-5. The model reads memory through cross-attention.
-6. The action readout sees the final hidden state, retrieved memory context, and explicit fusion features.
+## Delta-HotBob
 
-The memory bank stores:
+`docs/delta_hotbob.md` describes the delta-HotBob experiment inspired by
+`delta-mem`: use active scoped HotBob memory to steer a frozen decoder with
+low-rank query/output corrections, then compare that against the existing prefix
+adapter.
 
-```text
-vectors:       [batch, slots, d_model]
-occupied:      [batch, slots]
-strength:      [batch, slots]
-type_ids:      [batch, slots]
-scope_ids:     [batch, slots]
-privacy_ids:   [batch, slots]
-authority_ids: [batch, slots]
+The current q/o implementation patches selected Qwen-style attention modules
+ending in `self_attn.q_proj` and `self_attn.o_proj` with scoped forward pre-hooks.
+That keeps the Hugging Face module signatures and `generate()` cache behavior
+while injecting memory-conditioned low-rank corrections inside the attention
+path. Fake or unsupported models fall back to a residual approximation for CPU
+tests.
+
+This does not claim native working memory or long-context replacement. It is a
+first integration experiment: can typed, scoped operational memory condition a
+frozen decoder more deeply than a prefix while preserving HotBob's audit surface?
+
+## Recent LLM Results
+
+The most useful current prefix result used a larger synthetic LLM corpus:
+
+```bash
+uv run python -m hotbob.llm.generate_data \
+  --train-out data/llm_train_50k.jsonl \
+  --eval-out data/llm_eval_5k.jsonl \
+  --train-n 50000 \
+  --eval-n 5000 \
+  --seed 41
+
+uv run python -m hotbob.llm.train \
+  --model Qwen/Qwen2.5-0.5B-Instruct \
+  --traces data/llm_train_50k.jsonl \
+  --steps 10000 \
+  --batch-size 1 \
+  --integration-mode prefix \
+  --freeze-base \
+  --out runs/qwen_memory/prefix_50k_10k.pt
 ```
 
-The memory write controller predicts:
-
-- operation: `NOOP`, `WRITE`, `UPDATE`, `DELETE`
-- slot
-- type
-- normalized scope
-- privacy
-- authority
-- value vector
-- value class probe
-- write gate
-
-The value class probe is an auditing surface: it helps inspect what a memory vector appears to encode without turning memory back into prompt text.
-
-## Qwen Memory Adapter
-
-`src/hotbob/llm` adds a phase-one real decoder integration around
-`Qwen/Qwen2.5-0.5B-Instruct`.
-
-This is intentionally conservative:
-
-- Qwen loads through `transformers`
-- base Qwen weights are frozen by default
-- memory values are not inserted into prompts
-- event text is encoded into dense hidden states
-- typed memory is stored in the existing `MemoryBank`
-- final generation can prepend a learned soft prefix derived from active scoped memory
-- CPU smoke tests are supported; useful fine-tuning may require a GPU
-
-This is not yet memory-native LLM training. It is a bolt-on adapter probe to test
-whether a pretrained decoder can consume scoped neural working memory without
-seeing the memory as text.
-
-On CUDA machines, the project pins `torch` to the PyTorch `cu128` wheel index
-through `uv`, so `uv run` should see the GPU when the NVIDIA driver is installed.
-
-For private or rate-limited Hugging Face downloads, create a local `.env` file:
+The 10k-step frozen-Qwen prefix run completed in about 25 minutes on the local
+CUDA setup. Loss kept improving past the earlier 1k-step check:
 
 ```text
-HF_TOKEN=your_hugging_face_token
-HUGGING_FACE_HUB_TOKEN=your_hugging_face_token
+final loss: 0.1024
+mean loss:  0.2958
+
+00001-01000: mean=0.7446
+01001-02000: mean=0.3680
+02001-03000: mean=0.2901
+03001-04000: mean=0.3045
+04001-05000: mean=0.2336
+05001-06000: mean=0.2220
+06001-07000: mean=0.1919
+07001-08000: mean=0.2175
+08001-09000: mean=0.1877
+09001-10000: mean=0.1978
 ```
 
-`.env` is gitignored and should not be committed.
-
-## Evaluation
-
-Evaluation compares:
-
-- symbolic oracle memory
-- context-only neural model
-- teacher-forced memory
-- predicted-write memory
-- sequential teacher-forced memory
-- sequential predicted memory
-- sequential predicted memory with oracle slot/scope/value ablations
-- Qwen context-only generation
-- Qwen teacher-forced memory-prefix generation
-- Qwen predicted-memory-prefix generation
-
-Metrics include:
-
-- action accuracy by task family
-- memory-required aggregate accuracy
-- task-family diagnostics for standing orders, hidden colours, and expiry
-- secret leak failures
-- wrong-scope retrieval failures
-- expiry failures
-- write-head accuracies
-- value-class probe accuracy
-- boundary write precision/recall/F1
-- target-slot read attention mass
-- oracle ablation scores for slot/scope/value failures
-- active-memory JSONL debug dumps
-
-Current held-out runs show the intended memory signal: context-only drops on memory-required prompts, teacher-forced memory improves performance, and sequential predicted memory retrieves strongly after scope normalization, contrastive retrieval training, and direct sequential-controller supervision.
-
-The current bottleneck is no longer basic memory storage, scoping, or retrieval. The remaining failures are mostly in converting retrieved memory into the right policy/action semantics for harder families such as standing orders and active expiry.
-
-### Latest Sit-Rep
-
-A 1,000-step smoke-sized run on 10,000 train traces and 1,000 held-out eval traces produced:
+Held-out 5k score-based eval:
 
 ```text
-memory-required aggregate:
-  symbolic oracle:        1.000
-  context-only:           0.290
-  teacher-forced memory:  0.803
-  sequential predicted:   0.803
+context-only:
+  action accuracy:       0.3152
+  scope_isolation:       0.519
+  hidden_colour:         0.337
+  standing_order:        0.239
+  expiry:                0.000
+  symbol_binding:        0.481
 
-sequential predicted memory:
-  boundary F1:            1.000
-  target-slot read mass:  0.897
-  op/scope/slot/type/privacy/authority heads: ~1.000
-  value-class probe:      0.957
-```
+teacher-forced memory:
+  action accuracy:       0.961
+  scope_isolation:       1.000
+  hidden_colour:         0.805
+  standing_order:        1.000
+  expiry:                1.000
+  symbol_binding:        1.000
+  secret leak failures:  0
 
-Task-family results:
-
-```text
-hidden_colour:     1.000
-scope_isolation:   1.000
-symbol_binding:    1.000
-expiry:            0.730
-standing_order:    0.285
+predicted memory:
+  action accuracy:       0.484
+  scope_isolation:       0.000
+  hidden_colour:         0.676
+  standing_order:        1.000
+  expiry:                0.744
+  symbol_binding:        0.000
+  secret leak failures:  0
 ```
 
 Interpretation:
 
-- the model can learn when to write memory
-- it can assign typed metadata, scope, and slots reliably
-- it can retrieve the right active slot later without prompt leakage
-- predicted sequential memory now matches teacher-forced memory on aggregate
-- oracle slot/scope/value ablations no longer improve the predicted-memory score on the latest run
-- the remaining weakness is using the retrieved vector as an executable policy representation
-
-For the larger goal, this is a useful inflection point. HotBob is now less a test of whether a neural working-memory layer can store and retrieve scoped facts, and more a test of how that memory should be represented, decoded, and consumed by an agent policy. That is the relevant bridge toward an agentic LLM: memory should not merely be recallable; it must become operational state that reliably conditions tool choice, refusal, prioritisation, and task execution.
-
-### Qwen Adapter Result
-
-A frozen `Qwen/Qwen2.5-0.5B-Instruct` run with the phase-one soft-prefix adapter
-was trained on 2,000 LLM traces for 2,000 steps and evaluated on 500 held-out
-LLM traces.
-
-```text
-context-only generation:          0.116
-teacher-forced memory generation: 0.932
-predicted-memory generation:      0.536
-secret leak failures:             0
-```
-
-Predicted-memory accuracy by family:
-
-```text
-expiry:          0.780
-hidden_colour:   0.660
-scope_isolation: 0.470
-symbol_binding:  0.420
-standing_order:  0.350
-```
-
-Interpretation:
-
-- the final prompt alone still underperforms, so the traces are not simply leaking answers
-- Qwen can consume dense scoped memory through the learned prefix path
-- the predicted write/value controller carries usable signal, though it remains below teacher-forced memory
-- standing-order policy use is still the hardest family
-
-This is positive evidence for the bolt-on version of the core hypothesis: a real
-pretrained decoder can use non-text neural working memory to change end-to-end
-generation.
+- the final prompt alone still underperforms, so the task is not solved by prompt
+  leakage
+- a frozen Qwen decoder can use dense scoped HotBob memory through a learned
+  prefix
+- longer prefix training has real headroom on the current synthetic distribution
+- predicted-memory evaluation is currently bottlenecked by upstream memory
+  prediction/scope selection, not only by the decoder adapter
+- q/o correction is a deeper integration path, but prefix remains a strong
+  baseline and should continue to run in parallel
 
 ## Commands
 
-Generate one trace file:
+Install and test:
 
 ```bash
-uv run python -m hotbob.data.generate --n 1000 --out data/traces.jsonl
+uv sync
+uv run pytest
 ```
 
-Generate held-out train/eval splits:
+Generate synthetic controller traces:
 
 ```bash
 uv run python -m hotbob.data.generate \
@@ -254,22 +198,16 @@ uv run python -m hotbob.data.generate \
   --seed 3
 ```
 
-Run tests:
+Train and evaluate the compact neural memory controller:
 
 ```bash
-uv run pytest
-```
+uv run python -m hotbob.training.train \
+  --traces data/train.jsonl \
+  --steps 1000
 
-Smoke train:
-
-```bash
-uv run python -m hotbob.training.train --traces data/train.jsonl --steps 50 --smoke
-```
-
-Evaluate:
-
-```bash
-uv run python -m hotbob.training.evaluate --checkpoint runs/latest.pt --traces data/eval.jsonl
+uv run python -m hotbob.training.evaluate \
+  --checkpoint runs/latest.pt \
+  --traces data/eval.jsonl
 ```
 
 Generate LLM traces:
@@ -283,7 +221,7 @@ uv run python -m hotbob.llm.generate_data \
   --seed 3
 ```
 
-Train a phase-one frozen-Qwen memory-prefix adapter:
+Train frozen-Qwen prefix memory:
 
 ```bash
 uv run python -m hotbob.llm.train \
@@ -295,51 +233,99 @@ uv run python -m hotbob.llm.train \
   --freeze-base
 ```
 
-Evaluate the LLM adapter modes:
+Train frozen-Qwen q/o correction memory:
+
+```bash
+uv run python -m hotbob.llm.train \
+  --model Qwen/Qwen2.5-0.5B-Instruct \
+  --traces data/llm_train.jsonl \
+  --steps 1000 \
+  --batch-size 1 \
+  --integration-mode attention_qo \
+  --attention-patch-layers last4 \
+  --freeze-base
+```
+
+Evaluate one or all LLM modes:
 
 ```bash
 uv run python -m hotbob.llm.evaluate \
   --checkpoint runs/qwen_memory/latest.pt \
   --traces data/llm_eval.jsonl
+
+uv run python -m hotbob.llm.evaluate \
+  --checkpoint runs/qwen_memory/latest.pt \
+  --traces data/llm_eval.jsonl \
+  --mode teacher_forced
 ```
 
-## Current Challenges
+Useful LLM flags:
 
-The harness now exposes a narrower bottleneck:
+- `--integration-mode prefix|attention_q|attention_o|attention_qo`
+- `--memory-state-mode shared|by_type`
+- `--correction-rank 16`
+- `--attention-patch-layers all|last4|0,1,2`
+- `--mode all|context_only|teacher_forced|predicted`
+- `--decode-strategy score_answers|generate`
 
-- correct memory is useful
-- context-only prompts are no longer allowed to leak the answer
-- predicted and teacher-forced memory retrieve strongly on the current synthetic setup
-- the memory controller can classify write boundaries, scopes, slots, metadata, and value classes reliably
-- the remaining failures concentrate where a retrieved memory value must be interpreted as policy, not just recalled as a fact
+For private or rate-limited Hugging Face downloads, create a local `.env` file:
 
-Next work:
+```text
+HF_TOKEN=your_hugging_face_token
+HUGGING_FACE_HUB_TOKEN=your_hugging_face_token
+```
 
-- strengthen value-to-policy/action decoding for standing orders and active expiry
-- test richer memory value representations than mean token embeddings
-- add typed action heads or type-conditioned policy decoders
-- evaluate whether memory vectors should carry structured latent fields, not only dense values
-- introduce longer multi-turn agent traces with tool calls, interruptions, stale state, and authority conflicts
-- preserve the key constraint: final prompts must require memory without smuggling the answer back through text
+`.env` is gitignored and should not be committed.
 
-## Direction Toward Agentic LLMs
+## Current Research Questions
 
-The long-term target is a neural working-memory layer that can sit beside or inside an agentic LLM loop.
+The repo now exposes several concrete questions:
 
-HotBob deliberately tests the hard part in miniature:
+- Should working memory enter a decoder as prefix tokens, attention corrections,
+  or a deeper native memory pathway?
+- How should typed/scoped memories be grouped to reduce interference?
+- What metadata should be embedded into the memory readout path?
+- How should standing orders and expiry be represented so they become policy,
+  not just facts?
+- How much of predicted-memory failure is write/value/scope prediction versus
+  decoder consumption?
+- Can q/o-style correction overtake prefix once trained and tuned with the same
+  data budget?
 
-- operational state is written at event boundaries
-- state has type, scope, authority, privacy, and expiry metadata
-- later decisions are made without replaying the full prompt history
-- memory can be inspected and audited without converting it back into user-visible prose
+Near-term work:
 
-To become relevant to real LLM agents, the next research step is to move from categorical synthetic actions toward policy conditioning:
+- build a clean comparison harness for prefix, q-only, o-only, and q+o
+- profile and batch the slow eval paths
+- improve predicted memory scope/value selection
+- add corrupted-memory and wrong-scope-memory ablations
+- expand trace diversity around authority, privacy, stale state, and tool use
+- keep hidden memory out of prompts
 
-- memory-conditioned tool routing
-- memory-conditioned refusal and disclosure behavior
-- scoped project/session state
-- user/tool authority conflict handling
-- stale-memory expiry and replacement
-- compact memory reads that condition generation or planning without becoming prompt stuffing
+## Attribution
 
-The current result supports the core premise that scoped typed neural memory can be learned and retrieved. It does not yet prove that the retrieved memory is a sufficient substrate for robust agent policy. That is now the main research frontier.
+The q/o correction experiment is architecturally inspired by:
+
+```bibtex
+@misc{lei2026deltamemefficientonlinememory,
+  title={$\delta$-mem: Efficient Online Memory for Large Language Models},
+  author={Jingdi Lei and Di Zhang and Junxian Li and Weida Wang and Kaixuan Fan and Xiang Liu and Qihan Liu and Xiaoteng Ma and Baian Chen and Soujanya Poria},
+  year={2026},
+  eprint={2605.12357},
+  archivePrefix={arXiv},
+  primaryClass={cs.AI},
+  url={https://arxiv.org/abs/2605.12357},
+}
+```
+
+HotBob uses delta-mem as an architectural and methodological reference, not as a
+change in research lane. HotBob remains focused on scoped, typed, auditable
+operational working memory.
+
+## License And Contributions
+
+HotBob is licensed under the Apache License 2.0. The project is intended to be
+easy to fork, port, cite, extend, or repurpose.
+
+Useful contributions include reproductions, negative results, new decoder
+adapters, better write controllers, value encoders, retrieval losses,
+evaluators, docs, examples, and cleanup.

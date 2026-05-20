@@ -27,6 +27,23 @@ class MemoryBank:
         self.privacy_ids = torch.zeros(shape, dtype=torch.long, device=self.device)
         self.authority_ids = torch.zeros(shape, dtype=torch.long, device=self.device)
 
+    def clone_empty_like(self) -> MemoryBank:
+        clone = MemoryBank(self.num_slots, self.d_model, device=self.device)
+        clone.reset(self.occupied.shape[0])
+        return clone
+
+    def repeat_batch(self, batch_size: int) -> MemoryBank:
+        repeated = MemoryBank(self.num_slots, self.d_model, device=self.device)
+        repeated.reset(batch_size)
+        repeated.vectors = self.vectors[:1].repeat(batch_size, 1, 1)
+        repeated.occupied = self.occupied[:1].repeat(batch_size, 1)
+        repeated.strength = self.strength[:1].repeat(batch_size, 1)
+        repeated.type_ids = self.type_ids[:1].repeat(batch_size, 1)
+        repeated.scope_ids = self.scope_ids[:1].repeat(batch_size, 1)
+        repeated.privacy_ids = self.privacy_ids[:1].repeat(batch_size, 1)
+        repeated.authority_ids = self.authority_ids[:1].repeat(batch_size, 1)
+        return repeated
+
     def decay(self, rate: float) -> None:
         self.strength = self.strength * (1.0 - rate)
         self.occupied = self.occupied & (self.strength > 1e-6)
