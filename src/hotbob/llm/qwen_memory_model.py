@@ -73,6 +73,9 @@ class QwenMemoryModel(nn.Module):
             self.config_obj.memory_state_mode,
         )
         self.memory_heads.to(self._device())
+        self._q_patch_modules, self._o_patch_modules = self._discover_attention_patch_targets()
+        self._has_q_patch_modules = bool(self._q_patch_modules)
+        self._has_o_patch_modules = bool(self._o_patch_modules)
         if self.config_obj.freeze_base:
             self.freeze_base()
 
@@ -193,7 +196,7 @@ class QwenMemoryModel(nn.Module):
             raise RuntimeError("Base model does not expose output embeddings for o-correction.")
         return output_embeddings(hidden)
 
-    def _attention_patch_targets(self) -> tuple[list[nn.Module], list[nn.Module]]:
+    def _discover_attention_patch_targets(self) -> tuple[list[nn.Module], list[nn.Module]]:
         q_modules: list[nn.Module] = []
         o_modules: list[nn.Module] = []
         for name, module in self.base_model.named_modules():
@@ -204,6 +207,9 @@ class QwenMemoryModel(nn.Module):
         q_modules = self._select_attention_layers(q_modules)
         o_modules = self._select_attention_layers(o_modules)
         return q_modules, o_modules
+
+    def _attention_patch_targets(self) -> tuple[list[nn.Module], list[nn.Module]]:
+        return self._q_patch_modules, self._o_patch_modules
 
     def _select_attention_layers(self, modules: list[nn.Module]) -> list[nn.Module]:
         spec = self.config_obj.attention_patch_layers
@@ -216,8 +222,9 @@ class QwenMemoryModel(nn.Module):
         return [module for idx, module in enumerate(modules) if idx in indices]
 
     def _has_attention_patch_targets(self, *, apply_q: bool, apply_o: bool) -> bool:
-        q_modules, o_modules = self._attention_patch_targets()
-        return (not apply_q or bool(q_modules)) and (not apply_o or bool(o_modules))
+        return (not apply_q or self._has_q_patch_modules) and (
+            not apply_o or self._has_o_patch_modules
+        )
 
     @contextmanager
     def _memory_attention_patch(
@@ -288,10 +295,16 @@ class QwenMemoryModel(nn.Module):
         *,
         current_scope: str,
         use_memory: bool,
+        prefix_prompt_embeds: torch.Tensor | None = None,
+        prefix_prompt_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         use_prefix, apply_q, apply_o = self._mode_flags()
         if use_memory and use_prefix:
-            prefix, _ = self.memory_prefix_for_prompt_embeds(embeds, mask, current_scope)
+            prefix, _ = self.memory_prefix_for_prompt_embeds(
+                prefix_prompt_embeds if prefix_prompt_embeds is not None else embeds,
+                prefix_prompt_mask if prefix_prompt_mask is not None else mask,
+                current_scope,
+            )
             prefix = prefix.to(dtype=embeds.dtype)
             embeds = torch.cat([prefix, embeds], dim=1)
             prefix_mask = torch.ones(
@@ -433,6 +446,21 @@ class QwenMemoryModel(nn.Module):
                 attention_mask[idx, :length] = 1
             return {"input_ids": input_ids, "attention_mask": attention_mask}
 
+    def _candidate_texts(self, final_prompt: str, candidates: list[str]) -> list[str]:
+        return [f"{final_prompt} {candidate}" for candidate in candidates]
+
+    def _candidate_token_spans(
+        self,
+        final_prompt: str,
+        candidates: list[str],
+        encoded: dict[str, torch.Tensor],
+    ) -> torch.Tensor:
+        prompt_len = self._tokenize(final_prompt)["input_ids"].shape[1]
+        input_ids = encoded["input_ids"]
+        mask = encoded.get("attention_mask", torch.ones_like(input_ids))
+        token_positions = torch.arange(input_ids.shape[1] - 1, device=input_ids.device)
+        return mask[:, 1:].bool() & (token_positions.unsqueeze(0) >= max(prompt_len - 1, 0))
+
     def score_final_candidates(
         self,
         final_prompt: str,
@@ -441,47 +469,52 @@ class QwenMemoryModel(nn.Module):
         current_scope: str,
         use_memory: bool = True,
     ) -> torch.Tensor:
-        prompt_len = self._tokenize(final_prompt)["input_ids"].shape[1]
-        encoded = self._tokenize_texts([f"{final_prompt} {candidate}" for candidate in candidates])
+        encoded = self._tokenize_texts(self._candidate_texts(final_prompt, candidates))
         input_ids = encoded["input_ids"]
         mask = encoded.get("attention_mask", torch.ones_like(input_ids))
         embeds = self.base_model.get_input_embeddings()(input_ids)
-        prefix_once = None
+        prefix_prompt_embeds = None
+        prefix_prompt_mask = None
         if use_memory and self.config_obj.integration_mode == "prefix":
-            prefix_once, _ = self.memory_prefix_for_prompt(final_prompt, current_scope)
+            prefix_prompt_embeds, prefix_prompt_mask = self._embed_text(final_prompt)
+            prefix_prompt_embeds = prefix_prompt_embeds.repeat(input_ids.shape[0], 1, 1)
+            prefix_prompt_mask = prefix_prompt_mask.repeat(input_ids.shape[0], 1)
         with self._repeated_memory_batch(input_ids.shape[0]):
-            if prefix_once is not None:
-                prefix = prefix_once.to(dtype=embeds.dtype).repeat(input_ids.shape[0], 1, 1)
-                embeds = torch.cat([prefix, embeds], dim=1)
-                prefix_mask = torch.ones(
-                    (mask.shape[0], prefix.shape[1]), dtype=mask.dtype, device=mask.device
-                )
-                mask = torch.cat([prefix_mask, mask], dim=1)
-                logits = self.base_model(inputs_embeds=embeds, attention_mask=mask).logits
-                input_ids = torch.cat(
-                    [
-                        torch.zeros(
-                            (input_ids.shape[0], prefix.shape[1]),
-                            dtype=input_ids.dtype,
-                            device=input_ids.device,
-                        ),
-                        input_ids,
-                    ],
-                    dim=1,
-                )
-                prompt_len += prefix.shape[1]
-            else:
-                logits = self._base_logits_from_embeds(
-                    embeds,
-                    mask,
-                    current_scope=current_scope,
-                    use_memory=use_memory,
-                )
+            logits = self._base_logits_from_embeds(
+                embeds,
+                mask,
+                current_scope=current_scope,
+                use_memory=use_memory,
+                prefix_prompt_embeds=prefix_prompt_embeds,
+                prefix_prompt_mask=prefix_prompt_mask,
+            )
+        candidate_mask = self._candidate_token_spans(final_prompt, candidates, encoded)
+        if logits.shape[1] != input_ids.shape[1]:
+            prefix_len = logits.shape[1] - input_ids.shape[1]
+            input_ids = torch.cat(
+                [
+                    torch.zeros(
+                        (input_ids.shape[0], prefix_len),
+                        dtype=input_ids.dtype,
+                        device=input_ids.device,
+                    ),
+                    input_ids,
+                ],
+                dim=1,
+            )
+            candidate_mask = torch.cat(
+                [
+                    torch.zeros(
+                        (candidate_mask.shape[0], prefix_len),
+                        dtype=torch.bool,
+                        device=candidate_mask.device,
+                    ),
+                    candidate_mask,
+                ],
+                dim=1,
+            )
         shift_logits = logits[:, :-1].contiguous()
         shift_labels = input_ids[:, 1:].contiguous()
-        token_mask = mask[:, 1:].bool()
-        token_positions = torch.arange(shift_labels.shape[1], device=shift_labels.device)
-        candidate_mask = token_mask & (token_positions.unsqueeze(0) >= max(prompt_len - 1, 0))
         losses = nn.functional.cross_entropy(
             shift_logits.view(-1, shift_logits.shape[-1]),
             shift_labels.reshape(-1),

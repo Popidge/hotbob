@@ -187,6 +187,13 @@ uv sync
 uv run pytest
 ```
 
+## Experiment Workflow
+
+Project operating rules live in `AGENTS.md`. In short, keep `master` as the
+last-known-good branch, start core memory-mechanism changes on
+`experiment/<short-topic>` branches, do not commit generated data/checkpoints,
+and verify merges with `uv run pytest`.
+
 Generate synthetic controller traces:
 
 ```bash
@@ -233,6 +240,36 @@ uv run python -m hotbob.llm.train \
   --freeze-base
 ```
 
+Small performance guard run:
+
+```bash
+uv run python -m hotbob.llm.generate_data \
+  --train-out data/llm_train.jsonl \
+  --eval-out data/llm_eval.jsonl \
+  --train-n 10000 \
+  --eval-n 1000 \
+  --seed 3
+
+uv run pytest
+
+uv run python -m hotbob.llm.train \
+  --traces data/llm_train.jsonl \
+  --steps 10 \
+  --batch-size 2 \
+  --freeze-base
+
+uv run python -m hotbob.llm.evaluate \
+  --traces data/llm_eval.jsonl \
+  --limit 20 \
+  --mode all \
+  --decode-strategy score_answers
+
+uv run python -m hotbob.llm.compare \
+  --traces data/llm_eval.jsonl \
+  --mode teacher_forced \
+  --decode-strategy score_answers
+```
+
 Train frozen-Qwen q/o correction memory:
 
 ```bash
@@ -267,6 +304,7 @@ Useful LLM flags:
 - `--attention-patch-layers all|last4|0,1,2`
 - `--mode all|context_only|teacher_forced|predicted`
 - `--decode-strategy score_answers|generate`
+- `hotbob.llm.compare` evaluates named checkpoints through the same result path
 
 For private or rate-limited Hugging Face downloads, create a local `.env` file:
 

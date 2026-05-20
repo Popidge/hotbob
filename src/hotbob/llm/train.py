@@ -7,8 +7,15 @@ from pathlib import Path
 import torch
 from tqdm import tqdm
 
+from hotbob.experiment import ExperimentConfig, checkpoint_payload
 from hotbob.llm.dataset import build_llm_scope_vocab, read_llm_jsonl
 from hotbob.llm.qwen_memory_model import QwenMemoryConfig, QwenMemoryModel
+
+
+def batched_cycle(items: list, *, batch_size: int, steps: int):
+    iterator = itertools.cycle(items)
+    for _ in range(steps):
+        yield [next(iterator) for _ in range(batch_size)]
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -49,25 +56,39 @@ def main() -> None:
     optimizer = torch.optim.AdamW(model.memory_heads.parameters(), lr=1e-4)
     model.train()
     losses: list[float] = []
-    progress = tqdm(itertools.islice(itertools.cycle(traces), args.steps), total=args.steps)
-    for trace in progress:
+    progress = tqdm(
+        batched_cycle(traces, batch_size=max(args.batch_size, 1), steps=args.steps),
+        total=args.steps,
+    )
+    for batch in progress:
         optimizer.zero_grad(set_to_none=True)
-        lm_loss = model.teacher_forced_lm_loss(trace)
-        write_loss = model.write_supervision_loss(trace)
-        loss = lm_loss + args.write_loss_weight * write_loss
+        trace_losses = []
+        for trace in batch:
+            lm_loss = model.teacher_forced_lm_loss(trace)
+            write_loss = model.write_supervision_loss(trace)
+            trace_losses.append(lm_loss + args.write_loss_weight * write_loss)
+        loss = torch.stack(trace_losses).mean()
         loss.backward()
         optimizer.step()
         losses.append(float(loss.detach().cpu().item()))
         progress.set_postfix(loss=f"{losses[-1]:.4f}")
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+    experiment_config = ExperimentConfig(
+        name=Path(args.out).stem,
+        integration_mode=args.integration_mode,
+        memory_state_mode=args.memory_state_mode,
+        correction_rank=args.correction_rank,
+        attention_patch_layers=args.attention_patch_layers,
+        model_name=args.model,
+        train_traces=args.traces,
+    )
     torch.save(
-        {
-            "memory_heads_state": model.memory_heads.state_dict(),
-            "config": model.config_obj.__dict__,
-            "loss": losses[-1] if losses else None,
-            "mean_loss": sum(losses) / len(losses) if losses else None,
-            "losses": losses,
-        },
+        checkpoint_payload(
+            config={**model.config_obj.__dict__, **experiment_config.__dict__},
+            memory_heads_state=model.memory_heads.state_dict(),
+            losses=losses,
+            training_args=vars(args),
+        ),
         args.out,
     )
     print(f"wrote {args.out}")

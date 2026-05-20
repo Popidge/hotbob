@@ -4,6 +4,8 @@ import argparse
 import re
 from collections import Counter
 from collections.abc import Iterable
+from dataclasses import fields
+from itertools import islice
 
 import torch
 from tqdm import tqdm
@@ -11,6 +13,8 @@ from tqdm import tqdm
 from hotbob.llm.dataset import LLMTrace, build_llm_scope_vocab, read_llm_jsonl
 from hotbob.llm.prompts import ANSWER_SET
 from hotbob.llm.qwen_memory_model import QwenMemoryConfig, QwenMemoryModel
+
+QWEN_CONFIG_FIELDS = {field.name for field in fields(QwenMemoryConfig)}
 
 
 def normalize_generated_text(text: str) -> str:
@@ -44,6 +48,31 @@ def secret_leak(trace: LLMTrace, prediction: str) -> bool:
     )
 
 
+def batched(items: list[LLMTrace], batch_size: int) -> Iterable[list[LLMTrace]]:
+    batch_size = max(batch_size, 1)
+    iterator = iter(items)
+    while batch := list(islice(iterator, batch_size)):
+        yield batch
+
+
+def _prepare_memory_for_trace(model: QwenMemoryModel, trace: LLMTrace, mode: str) -> bool:
+    if mode == "teacher_forced":
+        model.apply_teacher_trace_memory(trace)
+        return True
+    if mode == "predicted":
+        model.reset_memory(1)
+        for event in trace.events:
+            model.forward_event(
+                event.role,
+                event.content,
+                scope=event.scope,
+                apply_predicted=True,
+            )
+        return True
+    model.reset_memory(1)
+    return False
+
+
 def evaluate_traces(
     model: QwenMemoryModel,
     traces: list[LLMTrace],
@@ -51,6 +80,7 @@ def evaluate_traces(
     mode: str,
     max_new_tokens: int = 16,
     decode_strategy: str = "score_answers",
+    batch_size: int = 1,
 ) -> dict[str, float | int | str]:
     correct = 0
     leaks = 0
@@ -59,47 +89,33 @@ def evaluate_traces(
     families: Counter[str] = Counter()
     family_correct: Counter[str] = Counter()
     with torch.no_grad():
-        for trace in tqdm(traces, desc=f"eval:{mode}"):
-            if mode == "teacher_forced":
-                model.apply_teacher_trace_memory(trace)
-                use_memory = True
-            elif mode == "predicted":
-                model.reset_memory(1)
-                for event in trace.events:
-                    model.forward_event(
-                        event.role,
-                        event.content,
-                        scope=event.scope,
-                        apply_predicted=True,
+        for group in tqdm(list(batched(traces, batch_size)), desc=f"eval:{mode}"):
+            for trace in group:
+                use_memory = _prepare_memory_for_trace(model, trace, mode)
+                if decode_strategy == "score_answers":
+                    pred = model.choose_final_candidate(
+                        trace.final_prompt,
+                        list(ANSWER_SET),
+                        current_scope=trace.current_scope,
+                        use_memory=use_memory,
                     )
-                use_memory = True
-            else:
-                model.reset_memory(1)
-                use_memory = False
-            if decode_strategy == "score_answers":
-                pred = model.choose_final_candidate(
-                    trace.final_prompt,
-                    list(ANSWER_SET),
-                    current_scope=trace.current_scope,
-                    use_memory=use_memory,
-                )
-            else:
-                pred = model.generate_final(
-                    trace.final_prompt,
-                    current_scope=trace.current_scope,
-                    use_memory=use_memory,
-                    max_new_tokens=max_new_tokens,
-                )
-            ok = exact_match(pred, trace.target_text)
-            correct += int(ok)
-            leaks += int(secret_leak(trace, pred))
-            family = str(trace.metadata.get("task_family", "unknown"))
-            families[family] += 1
-            family_correct[family] += int(ok)
-            if family == "scope_isolation" and not ok:
-                wrong_scope_failures += 1
-            if family == "expiry" and not ok:
-                expiry_failures += 1
+                else:
+                    pred = model.generate_final(
+                        trace.final_prompt,
+                        current_scope=trace.current_scope,
+                        use_memory=use_memory,
+                        max_new_tokens=max_new_tokens,
+                    )
+                ok = exact_match(pred, trace.target_text)
+                correct += int(ok)
+                leaks += int(secret_leak(trace, pred))
+                family = str(trace.metadata.get("task_family", "unknown"))
+                families[family] += 1
+                family_correct[family] += int(ok)
+                if family == "scope_isolation" and not ok:
+                    wrong_scope_failures += 1
+                if family == "expiry" and not ok:
+                    expiry_failures += 1
     total = len(traces)
     result: dict[str, float | int | str] = {
         "mode": mode,
@@ -134,6 +150,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--max-new-tokens", type=int, default=16)
+    parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument(
         "--decode-strategy",
         choices=["score_answers", "generate"],
@@ -157,7 +174,13 @@ def main() -> None:
     }
     if args.checkpoint:
         state = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
-        config_kwargs.update(state.get("config", {}))
+        config_kwargs.update(
+            {
+                key: value
+                for key, value in state.get("config", {}).items()
+                if key in QWEN_CONFIG_FIELDS
+            }
+        )
         config_kwargs["model_name"] = args.model
     if args.integration_mode is not None:
         config_kwargs["integration_mode"] = args.integration_mode
@@ -178,6 +201,7 @@ def main() -> None:
             mode=mode,
             max_new_tokens=args.max_new_tokens,
             decode_strategy=args.decode_strategy,
+            batch_size=args.batch_size,
         )
         for mode in modes
     }

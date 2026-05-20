@@ -5,7 +5,13 @@ import torch
 from torch import nn
 
 from hotbob.data.traces import generate_traces
-from hotbob.llm.dataset import generate_llm_traces, privacy_report, task_trace_to_llm_trace
+from hotbob.llm.compare import comparison_rows, parse_checkpoints
+from hotbob.llm.dataset import (
+    generate_llm_traces,
+    privacy_report,
+    task_trace_to_llm_trace,
+    write_llm_jsonl,
+)
 from hotbob.llm.evaluate import (
     build_arg_parser as build_eval_arg_parser,
 )
@@ -19,12 +25,22 @@ from hotbob.llm.generate_data import main as generate_llm_main
 from hotbob.llm.memory_adapter import LowRankMemoryCorrectionAdapter, MemoryPrefixAdapter
 from hotbob.llm.qwen_memory_model import QwenMemoryConfig, QwenMemoryModel
 from hotbob.llm.train import build_arg_parser as build_train_arg_parser
+from hotbob.llm.train import main as llm_train_main
 from hotbob.model.memory_bank import MemoryBank
 from hotbob.training.dataset import build_scope_vocab
 
 
 class TinyTokenizer:
-    def __call__(self, text: str, return_tensors: str = "pt"):
+    def __call__(self, text: str | list[str], return_tensors: str = "pt", padding: bool = False):
+        if isinstance(text, list):
+            rows = [self(row, return_tensors=return_tensors)["input_ids"][0] for row in text]
+            max_len = max(len(row) for row in rows)
+            input_ids = torch.zeros((len(rows), max_len), dtype=torch.long)
+            attention_mask = torch.zeros_like(input_ids)
+            for idx, row in enumerate(rows):
+                input_ids[idx, : len(row)] = row
+                attention_mask[idx, : len(row)] = 1
+            return {"input_ids": input_ids, "attention_mask": attention_mask}
         ids = [min((ord(ch) % 31) + 1, 31) for ch in text][:16] or [1]
         return {
             "input_ids": torch.tensor([ids], dtype=torch.long),
@@ -149,6 +165,10 @@ def tiny_qwen_like_memory_model(traces=None, integration_mode: str = "attention_
         base_model=base,
         tokenizer=TinyTokenizer(),
     )
+
+
+def tiny_train_model(config: QwenMemoryConfig) -> QwenMemoryModel:
+    return QwenMemoryModel(config, base_model=TinyCausalLM(), tokenizer=TinyTokenizer())
 
 
 def test_llm_trace_conversion_preserves_privacy_and_scope_metadata() -> None:
@@ -294,6 +314,26 @@ def test_attention_qo_uses_internal_patch_and_generate_with_qwen_like_model() ->
     assert model._has_attention_patch_targets(apply_q=True, apply_o=True)
 
 
+def test_attention_patch_targets_are_cached_and_last_layer_selected() -> None:
+    model = tiny_qwen_like_memory_model()
+    first_q, first_o = model._attention_patch_targets()
+    model.base_model.model.layers.append(TinyQwenLayer(model.hidden_size))
+    second_q, second_o = model._attention_patch_targets()
+    assert first_q is second_q
+    assert first_o is second_o
+    assert len(first_q) == 1
+    assert first_q[0] is model.base_model.model.layers[1].self_attn.q_proj
+    assert len(first_o) == 1
+    assert first_o[0] is model.base_model.model.layers[1].self_attn.o_proj
+
+
+def test_attention_fallback_residual_path_still_works_for_non_qwen_fake_model() -> None:
+    model = tiny_memory_model(integration_mode="attention_q")
+    assert not model._has_attention_patch_targets(apply_q=True, apply_o=False)
+    logits = model.final_prompt_logits("Answer now.", current_scope="default", use_memory=True)
+    assert logits.shape[1] == model._tokenize("Answer now.")["input_ids"].shape[1]
+
+
 def test_debug_dump_redacts_hidden_secrets_by_default() -> None:
     task_trace = next(t for t in generate_traces(20, seed=4) if t.task_family == "hidden_colour")
     llm_trace = task_trace_to_llm_trace(task_trace)
@@ -343,6 +383,10 @@ def test_llm_train_and_evaluate_argument_parsing_accept_attention_modes() -> Non
     )
     assert eval_args.integration_mode == "attention_q"
     assert eval_args.mode == "all"
+    eval_args = build_eval_arg_parser().parse_args(
+        ["--traces", "data/llm_eval.jsonl", "--batch-size", "2"]
+    )
+    assert eval_args.batch_size == 2
 
 
 def test_llm_evaluate_reports_mode_and_integration_metrics() -> None:
@@ -370,6 +414,103 @@ def test_candidate_scoring_returns_allowed_answer() -> None:
         use_memory=True,
     )
     assert answer in {"Correct.", "Hold fire."}
+
+
+def test_prefix_candidate_scoring_masks_prefix_and_prompt_positions() -> None:
+    model = tiny_memory_model(integration_mode="prefix")
+    encoded = model._tokenize_texts(model._candidate_texts("Prompt", ["Correct."]))
+    base_mask = model._candidate_token_spans("Prompt", ["Correct."], encoded)
+    scores = model.score_final_candidates(
+        "Prompt",
+        ["Correct."],
+        current_scope="default",
+        use_memory=True,
+    )
+    prefix_len = model.config_obj.memory_prefix_len
+    padded_mask = torch.cat(
+        [
+            torch.zeros((1, prefix_len), dtype=torch.bool),
+            base_mask,
+        ],
+        dim=1,
+    )
+    assert scores.shape == (1,)
+    assert not padded_mask[:, :prefix_len].any()
+    assert padded_mask.any()
+
+
+def test_llm_evaluate_batch_size_results_match() -> None:
+    traces = [task_trace_to_llm_trace(trace) for trace in generate_traces(2, seed=9)]
+    result_one = evaluate_traces(
+        tiny_memory_model(integration_mode="attention_qo"),
+        traces,
+        mode="context_only",
+        batch_size=1,
+    )
+    result_two = evaluate_traces(
+        tiny_memory_model(integration_mode="attention_qo"),
+        traces,
+        mode="context_only",
+        batch_size=2,
+    )
+    assert result_one == result_two
+
+
+def test_llm_train_batch_size_two_writes_checkpoint(tmp_path, monkeypatch) -> None:
+    traces = [task_trace_to_llm_trace(trace) for trace in generate_traces(2, seed=11)]
+    trace_path = tmp_path / "llm_train.jsonl"
+    out_path = tmp_path / "checkpoint.pt"
+    write_llm_jsonl(traces, trace_path)
+    monkeypatch.setattr("hotbob.llm.train.QwenMemoryModel", tiny_train_model)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "train",
+            "--traces",
+            str(trace_path),
+            "--steps",
+            "1",
+            "--batch-size",
+            "2",
+            "--integration-mode",
+            "attention_qo",
+            "--memory-state-mode",
+            "by_type",
+            "--correction-rank",
+            "4",
+            "--attention-patch-layers",
+            "last1",
+            "--freeze-base",
+            "--out",
+            str(out_path),
+        ],
+    )
+    llm_train_main()
+    state = torch.load(out_path, map_location="cpu", weights_only=False)
+    assert state["config"]["integration_mode"] == "attention_qo"
+    assert state["config"]["memory_state_mode"] == "by_type"
+    assert state["config"]["correction_rank"] == 4
+    assert state["config"]["attention_patch_layers"] == "last1"
+    assert len(state["losses"]) == 1
+
+
+def test_llm_compare_context_only_json_rows(monkeypatch) -> None:
+    traces = [task_trace_to_llm_trace(trace) for trace in generate_traces(2, seed=9)]
+    monkeypatch.setattr(
+        "hotbob.llm.compare.QwenMemoryModel",
+        lambda config: tiny_train_model(config),
+    )
+    rows = comparison_rows(
+        traces=traces,
+        model_name="tiny",
+        checkpoints=parse_checkpoints([]),
+        modes=["context_only"],
+        decode_strategy="score_answers",
+        batch_size=2,
+    )
+    assert rows[0]["run_name"] == "context_only"
+    assert rows[0]["eval_mode"] == "context_only"
+    assert "aggregate_accuracy" in rows[0]
 
 
 def test_llm_generate_data_cli_argument_parsing(tmp_path, monkeypatch) -> None:
