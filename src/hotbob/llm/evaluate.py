@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import re
 from collections import Counter
 from collections.abc import Iterable
@@ -88,8 +89,9 @@ def evaluate_traces(
     expiry_failures = 0
     families: Counter[str] = Counter()
     family_correct: Counter[str] = Counter()
-    with torch.no_grad():
-        for group in tqdm(list(batched(traces, batch_size)), desc=f"eval:{mode}"):
+    with torch.inference_mode():
+        total_batches = math.ceil(len(traces) / max(batch_size, 1))
+        for group in tqdm(batched(traces, batch_size), total=total_batches, desc=f"eval:{mode}"):
             for trace in group:
                 use_memory = _prepare_memory_for_trace(model, trace, mode)
                 if decode_strategy == "score_answers":
