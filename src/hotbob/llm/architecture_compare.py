@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import torch
+
+from hotbob.llm import train as train_module
 from hotbob.llm.compare import comparison_rows
 from hotbob.llm.dataset import read_llm_jsonl
 from hotbob.llm.train import train_checkpoint
@@ -106,12 +110,20 @@ def run_architecture_comparison(args: argparse.Namespace) -> dict[str, Any]:
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     train_results = []
     checkpoints: dict[str, str] = {}
+    base_wrapper = train_module.QwenMemoryModel(
+        train_module.QwenMemoryConfig(model_name=args.model, freeze_base=args.freeze_base)
+    )
+    base_model = base_wrapper.base_model
+    tokenizer = base_wrapper.tokenizer
+    del base_wrapper
     for variant in variants:
         if variant.name in checkpoints:
             raise ValueError(f"duplicate architecture variant name: {variant.name}")
         checkpoint_path = checkpoint_dir / f"{variant.name}.pt"
         result = train_checkpoint(
-            train_args_for_variant(args=args, variant=variant, checkpoint_path=checkpoint_path)
+            train_args_for_variant(args=args, variant=variant, checkpoint_path=checkpoint_path),
+            base_model=base_model,
+            tokenizer=tokenizer,
         )
         train_results.append(
             {
@@ -123,6 +135,9 @@ def run_architecture_comparison(args: argparse.Namespace) -> dict[str, Any]:
             }
         )
         checkpoints[variant.name] = str(checkpoint_path)
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     eval_traces = read_llm_jsonl(args.eval_traces)
     eval_rows = comparison_rows(
@@ -132,6 +147,8 @@ def run_architecture_comparison(args: argparse.Namespace) -> dict[str, Any]:
         modes=args.eval_modes,
         decode_strategy=args.decode_strategy,
         batch_size=args.eval_batch_size,
+        base_model=base_model,
+        tokenizer=tokenizer,
     )
     report = {
         "config": {

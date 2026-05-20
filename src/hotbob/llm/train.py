@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import itertools
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,6 +19,10 @@ def batched_cycle(items: list, *, batch_size: int, steps: int):
     iterator = itertools.cycle(items)
     for _ in range(steps):
         yield [next(iterator) for _ in range(batch_size)]
+
+
+def _model_accepts_shared_base() -> bool:
+    return "base_model" in inspect.signature(QwenMemoryModel).parameters
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -40,19 +45,28 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def train_checkpoint(args: argparse.Namespace | SimpleNamespace) -> dict[str, Any]:
+def train_checkpoint(
+    args: argparse.Namespace | SimpleNamespace,
+    *,
+    base_model: torch.nn.Module | None = None,
+    tokenizer: Any | None = None,
+) -> dict[str, Any]:
     traces = read_llm_jsonl(args.traces)
-    model = QwenMemoryModel(
-        QwenMemoryConfig(
-            model_name=args.model,
-            freeze_base=args.freeze_base,
-            integration_mode=args.integration_mode,
-            memory_state_mode=args.memory_state_mode,
-            correction_rank=args.correction_rank,
-            attention_patch_layers=args.attention_patch_layers,
-            scope_vocab=build_llm_scope_vocab(traces),
-        )
+    config = QwenMemoryConfig(
+        model_name=args.model,
+        freeze_base=args.freeze_base,
+        integration_mode=args.integration_mode,
+        memory_state_mode=args.memory_state_mode,
+        correction_rank=args.correction_rank,
+        attention_patch_layers=args.attention_patch_layers,
+        scope_vocab=build_llm_scope_vocab(traces),
     )
+    if base_model is None and tokenizer is None:
+        model = QwenMemoryModel(config)
+    elif _model_accepts_shared_base():
+        model = QwenMemoryModel(config, base_model=base_model, tokenizer=tokenizer)
+    else:
+        model = QwenMemoryModel(config)
     optimizer = torch.optim.AdamW(model.memory_heads.parameters(), lr=1e-4)
     model.train()
     losses: list[float] = []

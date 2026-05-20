@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import gc
+import inspect
 import json
 from collections.abc import Iterable
 from dataclasses import fields
@@ -13,6 +15,10 @@ from hotbob.llm.evaluate import evaluate_traces
 from hotbob.llm.qwen_memory_model import QwenMemoryConfig, QwenMemoryModel
 
 QWEN_CONFIG_FIELDS = {field.name for field in fields(QwenMemoryConfig)}
+
+
+def _model_accepts_shared_base() -> bool:
+    return "base_model" in inspect.signature(QwenMemoryModel).parameters
 
 
 def parse_checkpoints(values: list[str]) -> dict[str, str | None]:
@@ -33,6 +39,8 @@ def load_model(
     model_name: str,
     traces,
     checkpoint_path: str | None,
+    base_model: torch.nn.Module | None = None,
+    tokenizer=None,
 ) -> tuple[QwenMemoryModel, dict]:
     state = None
     config_kwargs = {
@@ -49,7 +57,13 @@ def load_model(
             }
         )
         config_kwargs["model_name"] = model_name
-    model = QwenMemoryModel(QwenMemoryConfig(**config_kwargs))
+    config = QwenMemoryConfig(**config_kwargs)
+    if base_model is None and tokenizer is None:
+        model = QwenMemoryModel(config)
+    elif _model_accepts_shared_base():
+        model = QwenMemoryModel(config, base_model=base_model, tokenizer=tokenizer)
+    else:
+        model = QwenMemoryModel(config)
     if state is not None:
         if "memory_heads_state" in state:
             model.memory_heads.load_state_dict(state["memory_heads_state"], strict=False)
@@ -88,6 +102,8 @@ def comparison_rows(
     modes: Iterable[str],
     decode_strategy: str,
     batch_size: int,
+    base_model: torch.nn.Module | None = None,
+    tokenizer=None,
 ) -> list[dict]:
     rows: list[dict] = []
     for run_name, checkpoint_path in checkpoints.items():
@@ -95,6 +111,8 @@ def comparison_rows(
             model_name=model_name,
             traces=traces,
             checkpoint_path=checkpoint_path,
+            base_model=base_model,
+            tokenizer=tokenizer,
         )
         for mode in modes:
             result = evaluate_traces(
@@ -124,6 +142,10 @@ def comparison_rows(
             if "git_commit" in state:
                 row["git_commit"] = state["git_commit"]
             rows.append(row)
+        del model
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
     return rows
 
 
