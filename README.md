@@ -270,7 +270,43 @@ uv run python -m hotbob.llm.compare \
   --decode-strategy score_answers
 ```
 
-Train frozen-Qwen q/o correction memory:
+Run the explicit memory-architecture comparison harness:
+
+```bash
+uv run python -m hotbob.llm.architecture_compare \
+  --model Qwen/Qwen2.5-0.5B-Instruct \
+  --train-traces data/llm_train.jsonl \
+  --eval-traces data/llm_eval.jsonl \
+  --steps 1000 \
+  --batch-size 1 \
+  --eval-batch-size 1 \
+  --eval-modes teacher_forced \
+  --variant prefix \
+  --variant attention_q:last4 \
+  --variant attention_o:last4 \
+  --variant attention_qo:last4
+```
+
+The harness trains every variant with the same frozen model, data, step count,
+batch size, correction rank, and write-loss weight. It writes one checkpoint per
+variant under `runs/qwen_memory/architecture_compare/checkpoints/` plus
+`comparison.json` containing loss buckets, final/mean loss, aggregate accuracy,
+by-family accuracy, and leakage/scope/expiry failure counts. Variants use:
+
+```text
+--variant mode[:layers]
+--variant mode:by_type[:layers]
+```
+
+For example, add typed q/o layer-routing ablations with:
+
+```bash
+--variant attention_qo:by_type:last1 \
+--variant attention_qo:by_type:last4 \
+--variant attention_qo:by_type:all
+```
+
+Single-run frozen-Qwen q/o correction training is still available:
 
 ```bash
 uv run python -m hotbob.llm.train \
@@ -305,6 +341,7 @@ Useful LLM flags:
 - `--mode all|context_only|teacher_forced|predicted`
 - `--decode-strategy score_answers|generate`
 - `hotbob.llm.compare` evaluates named checkpoints through the same result path
+- `hotbob.llm.architecture_compare` trains and evaluates a matched variant matrix
 
 For private or rate-limited Hugging Face downloads, create a local `.env` file:
 
@@ -332,7 +369,8 @@ The repo now exposes several concrete questions:
 
 Near-term work:
 
-- build a clean comparison harness for prefix, q-only, o-only, and q+o
+- use the comparison harness for prefix, q-only, o-only, and q+o layer/type
+  ablations
 - profile and batch the slow eval paths
 - improve predicted memory scope/value selection
 - add corrupted-memory and wrong-scope-memory ablations

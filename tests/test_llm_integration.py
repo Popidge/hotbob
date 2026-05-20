@@ -5,6 +5,12 @@ import torch
 from torch import nn
 
 from hotbob.data.traces import generate_traces
+from hotbob.llm.architecture_compare import (
+    bucket_losses,
+    build_arg_parser as build_architecture_compare_arg_parser,
+    parse_variant,
+    run_architecture_comparison,
+)
 from hotbob.llm.compare import comparison_rows, parse_checkpoints
 from hotbob.llm.dataset import (
     generate_llm_traces,
@@ -511,6 +517,63 @@ def test_llm_compare_context_only_json_rows(monkeypatch) -> None:
     assert rows[0]["run_name"] == "context_only"
     assert rows[0]["eval_mode"] == "context_only"
     assert "aggregate_accuracy" in rows[0]
+
+
+def test_architecture_compare_parses_variants_and_buckets_losses() -> None:
+    variant = parse_variant("attention_qo:by_type:last4")
+    assert variant.name == "attention_qo_by_type_last4"
+    assert variant.integration_mode == "attention_qo"
+    assert variant.memory_state_mode == "by_type"
+    assert variant.attention_patch_layers == "last4"
+    layer_only = parse_variant("attention_q:last1")
+    assert layer_only.name == "attention_q_last1"
+    assert layer_only.memory_state_mode == "shared"
+    assert layer_only.attention_patch_layers == "last1"
+    assert bucket_losses([1.0, 3.0, 5.0], 2) == [
+        {"start_step": 1, "end_step": 2, "mean_loss": 2.0},
+        {"start_step": 3, "end_step": 3, "mean_loss": 5.0},
+    ]
+
+
+def test_architecture_compare_runs_tiny_matrix(tmp_path, monkeypatch) -> None:
+    traces = [task_trace_to_llm_trace(trace) for trace in generate_traces(2, seed=11)]
+    train_path = tmp_path / "llm_train.jsonl"
+    eval_path = tmp_path / "llm_eval.jsonl"
+    run_dir = tmp_path / "runs"
+    write_llm_jsonl(traces, train_path)
+    write_llm_jsonl(traces, eval_path)
+    monkeypatch.setattr("hotbob.llm.train.QwenMemoryModel", tiny_train_model)
+    monkeypatch.setattr("hotbob.llm.compare.QwenMemoryModel", tiny_train_model)
+    args = build_architecture_compare_arg_parser().parse_args(
+        [
+            "--model",
+            "tiny",
+            "--train-traces",
+            str(train_path),
+            "--eval-traces",
+            str(eval_path),
+            "--steps",
+            "1",
+            "--batch-size",
+            "2",
+            "--eval-batch-size",
+            "2",
+            "--correction-rank",
+            "4",
+            "--run-dir",
+            str(run_dir),
+            "--variant",
+            "prefix",
+            "--variant",
+            "attention_qo:by_type:last1",
+        ]
+    )
+    result = run_architecture_comparison(args)
+    assert (run_dir / "comparison.json").exists()
+    assert len(result["training"]) == 2
+    assert len(result["evaluation"]) == 2
+    assert result["training"][1]["variant"]["memory_state_mode"] == "by_type"
+    assert (run_dir / "checkpoints" / "prefix.pt").exists()
 
 
 def test_llm_generate_data_cli_argument_parsing(tmp_path, monkeypatch) -> None:

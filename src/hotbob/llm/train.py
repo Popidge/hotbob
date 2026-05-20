@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import itertools
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
 import torch
 from tqdm import tqdm
@@ -38,9 +40,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main() -> None:
-    parser = build_arg_parser()
-    args = parser.parse_args()
+def train_checkpoint(args: argparse.Namespace | SimpleNamespace) -> dict[str, Any]:
     traces = read_llm_jsonl(args.traces)
     model = QwenMemoryModel(
         QwenMemoryConfig(
@@ -91,7 +91,19 @@ def main() -> None:
         ),
         args.out,
     )
-    print(f"wrote {args.out}")
+    return {
+        "checkpoint_path": args.out,
+        "losses": losses,
+        "final_loss": losses[-1] if losses else None,
+        "mean_loss": sum(losses) / len(losses) if losses else None,
+    }
+
+
+def main() -> None:
+    parser = build_arg_parser()
+    args = parser.parse_args()
+    result = train_checkpoint(args)
+    print(f"wrote {result['checkpoint_path']}")
 
 
 if __name__ == "__main__":
