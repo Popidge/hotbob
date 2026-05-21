@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 import torch
 from torch import nn
@@ -45,6 +45,11 @@ class QwenMemoryConfig:
     device: str = "auto"
     torch_dtype: str = "auto"
     scope_vocab: dict[str, int] = field(default_factory=lambda: {"default": 1})
+    lora_backend: Literal["none", "peft"] = "none"
+    lora_r: int = 16
+    lora_alpha: int = 32
+    lora_dropout: float = 0.05
+    lora_target_modules: tuple[str, ...] = ("q_proj", "k_proj", "v_proj", "o_proj")
 
 
 class QwenMemoryModel(nn.Module):
@@ -59,6 +64,7 @@ class QwenMemoryModel(nn.Module):
         self.config_obj = config or QwenMemoryConfig()
         self.tokenizer = tokenizer
         self.base_model = base_model if base_model is not None else self._load_qwen_model()
+        self._maybe_apply_lora()
         if self.tokenizer is None:
             self.tokenizer = self._load_qwen_tokenizer()
         self.hidden_size = self._hidden_size()
@@ -84,6 +90,10 @@ class QwenMemoryModel(nn.Module):
         self._has_o_patch_modules = bool(self._o_patch_modules)
         if self.config_obj.freeze_base:
             self.freeze_base()
+            if self.config_obj.lora_backend != "none":
+                for name, param in self.base_model.named_parameters():
+                    if "lora_" in name:
+                        param.requires_grad = True
 
     @classmethod
     def from_pretrained(cls, config: QwenMemoryConfig | None = None) -> QwenMemoryModel:
@@ -133,6 +143,50 @@ class QwenMemoryModel(nn.Module):
     def freeze_base(self) -> None:
         for param in self.base_model.parameters():
             param.requires_grad = False
+
+    def _maybe_apply_lora(self) -> None:
+        if self.config_obj.lora_backend == "none":
+            return
+        if self.config_obj.lora_backend != "peft":
+            raise ValueError(f"Unknown lora_backend: {self.config_obj.lora_backend}")
+        try:
+            from peft import LoraConfig, TaskType, get_peft_model
+        except ImportError as exc:
+            raise RuntimeError(
+                "Install peft or set lora_backend='none' to use Qwen LoRA adapters."
+            ) from exc
+        peft_config = LoraConfig(
+            task_type=TaskType.CAUSAL_LM,
+            r=self.config_obj.lora_r,
+            lora_alpha=self.config_obj.lora_alpha,
+            lora_dropout=self.config_obj.lora_dropout,
+            target_modules=list(self.config_obj.lora_target_modules),
+        )
+        self.base_model = get_peft_model(self.base_model, peft_config)
+
+    def lora_state_dict(self) -> dict[str, torch.Tensor]:
+        if self.config_obj.lora_backend == "none":
+            return {}
+        try:
+            from peft import get_peft_model_state_dict
+
+            return dict(get_peft_model_state_dict(self.base_model))
+        except (ImportError, AttributeError):
+            return {
+                key: value
+                for key, value in self.base_model.state_dict().items()
+                if "lora_" in key
+            }
+
+    def load_lora_state_dict(self, state: dict[str, torch.Tensor]) -> None:
+        if not state:
+            return
+        try:
+            from peft import set_peft_model_state_dict
+
+            set_peft_model_state_dict(self.base_model, state)
+        except (ImportError, AttributeError):
+            self.base_model.load_state_dict(state, strict=False)
 
     def reset_memory(self, batch_size: int = 1) -> None:
         self.memory = MemoryBank(
@@ -528,6 +582,25 @@ class QwenMemoryModel(nn.Module):
         ).view_as(shift_labels)
         scores = -(losses * candidate_mask).sum(dim=1) / candidate_mask.sum(dim=1).clamp_min(1)
         return scores
+
+    def score_final_candidates_dict(
+        self,
+        final_prompt: str,
+        candidates: list[str],
+        *,
+        current_scope: str,
+        use_memory: bool = True,
+    ) -> dict[str, float]:
+        scores = self.score_final_candidates(
+            final_prompt,
+            candidates,
+            current_scope=current_scope,
+            use_memory=use_memory,
+        )
+        return {
+            candidate: float(score.detach().cpu().item())
+            for candidate, score in zip(candidates, scores, strict=True)
+        }
 
     def choose_final_candidate(
         self,
