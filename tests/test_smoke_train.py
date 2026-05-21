@@ -33,3 +33,7 @@ def test_smoke_train_cli(tmp_path, monkeypatch) -> None:
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     assert checkpoint["config"]["sequential_controller_loss"] is True
     assert checkpoint["config"]["sequential_predicted_warmup_steps"] == 0
+    assert checkpoint["config"]["structured_loss_weight"] == 0.2
+    assert checkpoint["config"]["num_payload_kinds"] > 1
+    assert checkpoint["config"]["num_policy_actions"] > 1
+    assert any(key.endswith("payload_kind_head.weight") for key in checkpoint["model_state"])

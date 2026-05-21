@@ -11,7 +11,7 @@ import torch
 from tqdm import tqdm
 
 from hotbob.experiment import ExperimentConfig, checkpoint_payload
-from hotbob.llm.dataset import build_llm_scope_vocab, read_llm_jsonl
+from hotbob.llm.dataset import build_llm_scope_vocab, build_llm_tool_name_vocab, read_llm_jsonl
 from hotbob.llm.qwen_memory_model import QwenMemoryConfig, QwenMemoryModel
 
 
@@ -41,6 +41,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--attention-patch-layers", default="all")
     parser.add_argument("--freeze-base", action="store_true")
     parser.add_argument("--write-loss-weight", type=float, default=0.2)
+    parser.add_argument("--structured-loss-weight", type=float, default=0.2)
     parser.add_argument("--out", default="runs/qwen_memory/latest.pt")
     return parser
 
@@ -59,7 +60,9 @@ def train_checkpoint(
         memory_state_mode=args.memory_state_mode,
         correction_rank=args.correction_rank,
         attention_patch_layers=args.attention_patch_layers,
+        structured_loss_weight=getattr(args, "structured_loss_weight", 0.2),
         scope_vocab=build_llm_scope_vocab(traces),
+        tool_name_vocab=build_llm_tool_name_vocab(traces),
     )
     if base_model is None and tokenizer is None:
         model = QwenMemoryModel(config)

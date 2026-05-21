@@ -46,7 +46,15 @@ def task_trace_to_llm_trace(trace: TaskTrace) -> LLMTrace:
         target_action=str(trace.expected_final_action),
         current_scope=trace.current_scope,
         expected_memory_ops=trace.expected_memory_ops,
-        metadata=dict(trace.metadata, task_family=trace.task_family),
+        metadata=dict(
+            trace.metadata,
+            task_family=trace.task_family,
+            memory_required=True,
+            structured_payload_required=True,
+            final_event_hides_memory_value=trace.metadata.get(
+                "final_event_hides_memory_value", True
+            ),
+        ),
     )
 
 
@@ -59,6 +67,18 @@ def privacy_report(trace: LLMTrace) -> TracePrivacyReport:
         final_prompt_contains_hidden_value=contains_hidden_value,
         hidden_values=hidden_values,
     )
+
+
+def build_llm_tool_name_vocab(traces: list[LLMTrace]) -> dict[str, int]:
+    names: set[str] = set()
+    for trace in traces:
+        for op in trace.expected_memory_ops:
+            payload = op.payload
+            if hasattr(payload, "tool_name"):
+                names.add(str(payload.tool_name))
+            if hasattr(payload, "committed_tool_sequence"):
+                names.update(str(name) for name in payload.committed_tool_sequence)
+    return {name: idx + 1 for idx, name in enumerate(sorted(names))}
 
 
 def write_llm_jsonl(traces: list[LLMTrace], out: str | Path) -> None:

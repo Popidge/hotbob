@@ -87,7 +87,7 @@ def test_evaluate_debug_dump_redacts_private_values(tmp_path, monkeypatch) -> No
             "--debug-dumps-out",
             str(redacted),
             "--debug-families",
-            "hidden_colour",
+            "privacy_disclosure_conflict",
             "--debug-max-traces",
             "1",
         ],
@@ -95,7 +95,7 @@ def test_evaluate_debug_dump_redacts_private_values(tmp_path, monkeypatch) -> No
     evaluate_main()
 
     row = json.loads(redacted.read_text(encoding="utf-8").splitlines()[0])
-    assert row["task_family"] == "hidden_colour"
+    assert row["task_family"] == "privacy_disclosure_conflict"
     assert row["active_memory_slots"]
     assert row["active_memory_slots"][0]["value"] == "<redacted>"
 
@@ -113,7 +113,7 @@ def test_evaluate_debug_dump_redacts_private_values(tmp_path, monkeypatch) -> No
             "--debug-dumps-out",
             str(unredacted),
             "--debug-families",
-            "hidden_colour",
+            "privacy_disclosure_conflict",
             "--debug-max-traces",
             "1",
             "--debug-include-private-values",
@@ -129,10 +129,10 @@ def test_family_diagnostic_helpers_track_scenarios() -> None:
     trace = next(
         trace
         for trace in generate_traces(30, seed=5)
-        if trace.task_family == "hidden_colour"
+        if trace.task_family == "privacy_disclosure_conflict"
         and trace.expected_final_action == ActionLabel.REFUSE_TO_REVEAL_SECRET
     )
-    action_confusion = {"hidden_colour_reveal": Counter()}
+    action_confusion = {"privacy_disclosure_conflict": Counter()}
     read_mass_sum: Counter[str] = Counter()
     read_mass_count: Counter[str] = Counter()
     memory_total: Counter[str] = Counter()
@@ -151,7 +151,7 @@ def test_family_diagnostic_helpers_track_scenarios() -> None:
     )
 
     scenario = diagnostic_scenario(trace)
-    assert scenario == "hidden_colour_reveal"
+    assert scenario == "privacy_disclosure_conflict"
     assert action_confusion[scenario][("REFUSE_TO_REVEAL_SECRET", "ANSWER_NO")] == 1
     assert read_mass_sum[scenario] == 0.75
     assert read_mass_count[scenario] == 1

@@ -22,6 +22,13 @@ class StatefulTransformer(nn.Module):
         num_privacy: int = 3,
         num_authority: int = 4,
         num_value_classes: int = 1,
+        num_payload_kinds: int = 1,
+        num_policy_actions: int = 1,
+        num_policy_triggers: int = 1,
+        num_expiry_policies: int = 1,
+        num_authority_levels: int = 1,
+        num_tool_names: int = 1,
+        num_route_steps: int = 1,
         max_seq_len: int = 256,
     ) -> None:
         super().__init__()
@@ -35,6 +42,13 @@ class StatefulTransformer(nn.Module):
             num_privacy=num_privacy,
             num_authority=num_authority,
             num_value_classes=num_value_classes,
+            num_payload_kinds=num_payload_kinds,
+            num_policy_actions=num_policy_actions,
+            num_policy_triggers=num_policy_triggers,
+            num_expiry_policies=num_expiry_policies,
+            num_authority_levels=num_authority_levels,
+            num_tool_names=num_tool_names,
+            num_route_steps=num_route_steps,
         )
         self.action_readout = ActionReadout(d_model, action_vocab_size)
 

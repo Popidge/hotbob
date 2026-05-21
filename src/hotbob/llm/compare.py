@@ -10,7 +10,7 @@ from pathlib import Path
 
 import torch
 
-from hotbob.llm.dataset import build_llm_scope_vocab, read_llm_jsonl
+from hotbob.llm.dataset import build_llm_scope_vocab, build_llm_tool_name_vocab, read_llm_jsonl
 from hotbob.llm.evaluate import evaluate_traces
 from hotbob.llm.qwen_memory_model import QwenMemoryConfig, QwenMemoryModel
 
@@ -46,6 +46,7 @@ def load_model(
     config_kwargs = {
         "model_name": model_name,
         "scope_vocab": build_llm_scope_vocab(traces),
+        "tool_name_vocab": build_llm_tool_name_vocab(traces),
     }
     if checkpoint_path is not None:
         state = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
@@ -132,6 +133,13 @@ def comparison_rows(
                 "secret_leak_failures": result["secret_leak_failures"],
                 "wrong_scope_failures": result["wrong_scope_failures"],
                 "expiry_failures": result["expiry_failures"],
+                "authority_conflict_failures": result["authority_conflict_failures"],
+                "tool_override_failures": result["tool_override_failures"],
+                "interruption_failures": result["interruption_failures"],
+                "stale_state_failures": result["stale_state_failures"],
+                "privacy_disclosure_failures": result["privacy_disclosure_failures"],
+                "tool_routing_failures": result["tool_routing_failures"],
+                "structured_policy_failures": result["structured_policy_failures"],
             }
             row["family_accuracies"] = {
                 key.removesuffix("_accuracy"): value

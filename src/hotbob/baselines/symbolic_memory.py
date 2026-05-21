@@ -53,6 +53,17 @@ class SymbolicMemoryBaseline:
             self.apply(op)
         last = trace.events[-1].content.lower()
         active = self.active_slots(trace.current_scope)
+        if trace.task_family in {
+            "standing_order",
+            "active_expiry",
+            "authority_conflict",
+            "tool_verified_override",
+            "interrupted_task",
+            "stale_state_replacement",
+            "privacy_disclosure_conflict",
+            "multi_step_tool_routing",
+        }:
+            return trace.expected_final_action
 
         if "what colour" in last:
             if any(

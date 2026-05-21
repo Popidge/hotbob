@@ -22,6 +22,7 @@ GENERIC_MEMORY_TOKENS = {
     "shields",
     "route",
     "inspection",
+    "total",
 }
 
 

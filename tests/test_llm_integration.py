@@ -7,9 +7,11 @@ from torch import nn
 from hotbob.data.traces import generate_traces
 from hotbob.llm.architecture_compare import (
     bucket_losses,
-    build_arg_parser as build_architecture_compare_arg_parser,
     parse_variant,
     run_architecture_comparison,
+)
+from hotbob.llm.architecture_compare import (
+    build_arg_parser as build_architecture_compare_arg_parser,
 )
 from hotbob.llm.compare import comparison_rows, parse_checkpoints
 from hotbob.llm.dataset import (
@@ -178,12 +180,14 @@ def tiny_train_model(config: QwenMemoryConfig) -> QwenMemoryModel:
 
 
 def test_llm_trace_conversion_preserves_privacy_and_scope_metadata() -> None:
-    task_trace = next(t for t in generate_traces(20, seed=4) if t.task_family == "hidden_colour")
+    task_trace = next(
+        t for t in generate_traces(20, seed=4) if t.task_family == "privacy_disclosure_conflict"
+    )
     llm_trace = task_trace_to_llm_trace(task_trace)
     report = privacy_report(llm_trace)
     assert llm_trace.current_scope == task_trace.current_scope
     assert llm_trace.expected_memory_ops[0].scope == task_trace.current_scope
-    assert llm_trace.metadata["task_family"] == "hidden_colour"
+    assert llm_trace.metadata["task_family"] == "privacy_disclosure_conflict"
     assert not report.final_prompt_contains_hidden_value
 
 
@@ -341,7 +345,9 @@ def test_attention_fallback_residual_path_still_works_for_non_qwen_fake_model() 
 
 
 def test_debug_dump_redacts_hidden_secrets_by_default() -> None:
-    task_trace = next(t for t in generate_traces(20, seed=4) if t.task_family == "hidden_colour")
+    task_trace = next(
+        t for t in generate_traces(20, seed=4) if t.task_family == "privacy_disclosure_conflict"
+    )
     llm_trace = task_trace_to_llm_trace(task_trace)
     model = tiny_memory_model([task_trace])
     model.apply_teacher_trace_memory(llm_trace)
@@ -374,6 +380,7 @@ def test_llm_train_and_evaluate_argument_parsing_accept_attention_modes() -> Non
     assert train_args.memory_state_mode == "by_type"
     assert train_args.attention_patch_layers == "last4"
     assert train_args.freeze_base
+    assert train_args.structured_loss_weight == 0.2
 
     eval_args = build_eval_arg_parser().parse_args(
         [
@@ -406,6 +413,9 @@ def test_llm_evaluate_reports_mode_and_integration_metrics() -> None:
     assert "secret_leak_failures" in result
     assert "wrong_scope_failures" in result
     assert "expiry_failures" in result
+    assert "authority_conflict_failures" in result
+    assert "tool_override_failures" in result
+    assert "structured_policy_failures" in result
 
 
 def test_candidate_scoring_returns_allowed_answer() -> None:
@@ -497,6 +507,7 @@ def test_llm_train_batch_size_two_writes_checkpoint(tmp_path, monkeypatch) -> No
     assert state["config"]["memory_state_mode"] == "by_type"
     assert state["config"]["correction_rank"] == 4
     assert state["config"]["attention_patch_layers"] == "last1"
+    assert state["config"]["structured_loss_weight"] == 0.2
     assert len(state["losses"]) == 1
 
 
@@ -517,6 +528,7 @@ def test_llm_compare_context_only_json_rows(monkeypatch) -> None:
     assert rows[0]["run_name"] == "context_only"
     assert rows[0]["eval_mode"] == "context_only"
     assert "aggregate_accuracy" in rows[0]
+    assert "tool_routing_failures" in rows[0]
 
 
 def test_architecture_compare_parses_variants_and_buckets_losses() -> None:
@@ -570,6 +582,7 @@ def test_architecture_compare_runs_tiny_matrix(tmp_path, monkeypatch) -> None:
     )
     result = run_architecture_comparison(args)
     assert (run_dir / "comparison.json").exists()
+    assert result["config"]["structured_loss_weight"] == 0.2
     assert len(result["training"]) == 2
     assert len(result["evaluation"]) == 2
     assert result["training"][1]["variant"]["memory_state_mode"] == "by_type"

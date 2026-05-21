@@ -77,6 +77,87 @@ keeps the base decoder frozen by default. It supports:
 Memory values are not inserted into the prompt. The LLM adapter consumes
 `MemoryBank` tensors and metadata.
 
+## Typed Memory Families Experiment
+
+The `experiment/typed-memory-families` branch changes the synthetic memory
+distribution from mostly string-valued traces to first-class structured payloads
+on `MemoryOp`. The goal is data and target quality: expose policy, authority,
+expiry, disclosure, stale-state replacement, and tool-routing structure to the
+existing prefix/q/o comparison harness without adding native transformer memory
+gates yet.
+
+The rich families are:
+
+- `standing_order`
+- `active_expiry`
+- `authority_conflict`
+- `tool_verified_override`
+- `interrupted_task`
+- `stale_state_replacement`
+- `privacy_disclosure_conflict`
+- `multi_step_tool_routing`
+
+Example standing-order payload:
+
+```yaml
+kind: standing_order
+default_action: hold_fire
+trigger: hostile_posture
+allowed_responses: [raise_shields, evade, hail]
+forbidden_responses: [fire_weapons]
+exceptions: [civilians_at_risk]
+authority_level: captain
+expiry_policy: mission_end
+```
+
+Smoke run for the rich LLM path:
+
+```bash
+uv run python -m hotbob.llm.generate_data \
+  --train-out data/llm_rich_train_smoke.jsonl \
+  --eval-out data/llm_rich_eval_smoke.jsonl \
+  --train-n 100 \
+  --eval-n 40 \
+  --seed 7
+
+uv run python -m hotbob.llm.train \
+  --model Qwen/Qwen2.5-0.5B-Instruct \
+  --traces data/llm_rich_train_smoke.jsonl \
+  --steps 10 \
+  --batch-size 1 \
+  --integration-mode prefix \
+  --freeze-base \
+  --structured-loss-weight 0.2 \
+  --out runs/qwen_memory/rich_smoke.pt
+
+uv run python -m hotbob.llm.evaluate \
+  --checkpoint runs/qwen_memory/rich_smoke.pt \
+  --traces data/llm_rich_eval_smoke.jsonl \
+  --limit 20 \
+  --mode teacher_forced \
+  --decode-strategy score_answers
+```
+
+Expected Modal/T4 comparison shape:
+
+```bash
+uv run python -m hotbob.llm.architecture_compare \
+  --model Qwen/Qwen2.5-0.5B-Instruct \
+  --train-traces data/llm_rich_train.jsonl \
+  --eval-traces data/llm_rich_eval.jsonl \
+  --steps 10000 \
+  --batch-size 1 \
+  --eval-batch-size 1 \
+  --eval-modes teacher_forced \
+  --decode-strategy score_answers \
+  --structured-loss-weight 0.2 \
+  --variant prefix \
+  --variant attention_q:last4 \
+  --variant attention_o:last4 \
+  --variant attention_qo:last4 \
+  --variant attention_qo:by_type:last4
+```
+
 ## Delta-HotBob
 
 `docs/delta_hotbob.md` describes the delta-HotBob experiment inspired by

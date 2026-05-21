@@ -9,7 +9,12 @@ from hotbob.model.memory_bank import MemoryBank
 from hotbob.model.memory_read import MemoryRead
 from hotbob.model.memory_write import MemoryWrite
 from hotbob.training.dataset import (
+    AUTHORITY_LEVEL_TO_ID,
     AUTHORITY_TO_ID,
+    EXPIRY_POLICY_TO_ID,
+    PAYLOAD_KIND_TO_ID,
+    POLICY_ACTION_TO_ID,
+    POLICY_TRIGGER_TO_ID,
     PRIVACY_TO_ID,
     TYPE_TO_ID,
     normalize_scope,
@@ -183,6 +188,8 @@ class LQwenMemoryHeads(nn.Module):
         num_memory_slots: int,
         num_scopes: int,
         num_value_classes: int,
+        num_tool_names: int = 1,
+        num_route_steps: int = 8,
         memory_prefix_len: int = 4,
         correction_rank: int = 16,
         memory_state_mode: MemoryStateMode | str = MemoryStateMode.SHARED,
@@ -196,6 +203,13 @@ class LQwenMemoryHeads(nn.Module):
             len(PRIVACY_TO_ID),
             len(AUTHORITY_TO_ID),
             num_value_classes,
+            max(PAYLOAD_KIND_TO_ID.values(), default=0) + 1,
+            max(POLICY_ACTION_TO_ID.values(), default=0) + 1,
+            max(POLICY_TRIGGER_TO_ID.values(), default=0) + 1,
+            max(EXPIRY_POLICY_TO_ID.values(), default=0) + 1,
+            max(AUTHORITY_LEVEL_TO_ID.values(), default=0) + 1,
+            num_tool_names,
+            num_route_steps,
         )
         self.value_projector = nn.Linear(hidden_size, hidden_size)
         self.prefix = MemoryPrefixAdapter(hidden_size, memory_prefix_len)

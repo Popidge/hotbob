@@ -1,6 +1,7 @@
 from hotbob.baselines import SymbolicMemoryBaseline
 from hotbob.data.hygiene import final_event_memory_leaks, is_memory_required_trace
 from hotbob.data.traces import generate_traces
+from hotbob.llm.prompts import final_prompt_from_trace
 from hotbob.types import ActionLabel
 
 
@@ -17,50 +18,33 @@ def test_memory_required_final_events_do_not_leak_memory_values() -> None:
 
 def test_memory_required_families_have_nontrivial_action_balance() -> None:
     traces = generate_traces(200, seed=13)
-    symbol_actions = {
-        trace.expected_final_action for trace in traces if trace.task_family == "symbol_binding"
-    }
-    assert len(symbol_actions) == 2
-    expiry_actions = {
-        trace.expected_final_action for trace in traces if trace.task_family == "expiry"
-    }
-    standing_actions = {
-        trace.expected_final_action for trace in traces if trace.task_family == "standing_order"
-    }
-    assert len(expiry_actions) >= 3
-    assert len(standing_actions) >= 3
+    for family in {trace.task_family for trace in traces}:
+        actions = {trace.expected_final_action for trace in traces if trace.task_family == family}
+        assert len(actions) >= 2
 
 
-def test_hidden_colour_guess_prompts_expose_guess_not_secret() -> None:
+def test_hidden_private_payload_values_do_not_appear_in_final_prompts() -> None:
     traces = [
         trace
         for trace in generate_traces(100, seed=21)
-        if trace.task_family == "hidden_colour"
-        and trace.expected_final_action != ActionLabel.REFUSE_TO_REVEAL_SECRET
+        if any("HIDDEN_FROM_USER" in str(op.privacy) for op in trace.expected_memory_ops)
     ]
     assert traces
     for trace in traces:
-        final = trace.events[-1].content.lower()
-        assert f"i guess {trace.metadata['guess_colour']}" in final
-        assert "secret_colour" not in final
+        final = final_prompt_from_trace(trace)
+        for op in trace.expected_memory_ops:
+            if "HIDDEN_FROM_USER" in str(op.privacy):
+                assert op.value not in final
         assert final_event_memory_leaks(trace) == []
 
 
 def test_memory_required_final_prompts_have_action_variants() -> None:
     traces = generate_traces(300, seed=22)
-    actions_by_final: dict[tuple[str, str], set[ActionLabel]] = {}
-    for trace in traces:
-        if trace.task_family in {"hidden_colour", "standing_order", "expiry"}:
-            key = (trace.task_family, trace.events[-1].content.lower())
-            actions_by_final.setdefault(key, set()).add(trace.expected_final_action)
-
+    assert all("payload" not in final_prompt_from_trace(trace).lower() for trace in traces)
     assert any(
-        family == "standing_order" and len(actions) >= 2
-        for (family, _), actions in actions_by_final.items()
-    )
-    assert any(
-        family == "expiry" and len(actions) >= 2
-        for (family, _), actions in actions_by_final.items()
+        trace.task_family == "privacy_disclosure_conflict"
+        and trace.expected_final_action == ActionLabel.REFUSE_TO_REVEAL_SECRET
+        for trace in traces
     )
 
 

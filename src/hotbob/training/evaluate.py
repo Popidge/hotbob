@@ -25,6 +25,7 @@ from hotbob.training.dataset import (
     TraceDataset,
     TraceVocab,
     collate_traces,
+    memory_text_from_op,
     normalize_scope,
     tokenize_text,
 )
@@ -243,6 +244,7 @@ def evaluate_neural(
         vocab=vocab,
         scope_vocab=checkpoint["scope_vocab"],
         value_vocab=checkpoint.get("value_vocab"),
+        tool_name_vocab=checkpoint.get("tool_name_vocab"),
     )
     config = checkpoint["config"]
     model = StatefulTransformer(
@@ -255,6 +257,13 @@ def evaluate_neural(
         num_privacy=len(PRIVACY_TO_ID),
         num_authority=len(AUTHORITY_TO_ID),
         num_value_classes=config.get("num_value_classes", 1),
+        num_payload_kinds=config.get("num_payload_kinds", 1),
+        num_policy_actions=config.get("num_policy_actions", 1),
+        num_policy_triggers=config.get("num_policy_triggers", 1),
+        num_expiry_policies=config.get("num_expiry_policies", 1),
+        num_authority_levels=config.get("num_authority_levels", 1),
+        num_tool_names=config.get("num_tool_names", 1),
+        num_route_steps=config.get("num_route_steps", 8),
         max_seq_len=config.get("max_seq_len", 256),
     ).to(device)
     model.load_state_dict(checkpoint["model_state"])
@@ -415,6 +424,7 @@ def load_model_and_dataset(
         vocab=vocab,
         scope_vocab=checkpoint["scope_vocab"],
         value_vocab=checkpoint.get("value_vocab"),
+        tool_name_vocab=checkpoint.get("tool_name_vocab"),
     )
     config = checkpoint["config"]
     model = StatefulTransformer(
@@ -427,6 +437,13 @@ def load_model_and_dataset(
         num_privacy=len(PRIVACY_TO_ID),
         num_authority=len(AUTHORITY_TO_ID),
         num_value_classes=config.get("num_value_classes", 1),
+        num_payload_kinds=config.get("num_payload_kinds", 1),
+        num_policy_actions=config.get("num_policy_actions", 1),
+        num_policy_triggers=config.get("num_policy_triggers", 1),
+        num_expiry_policies=config.get("num_expiry_policies", 1),
+        num_authority_levels=config.get("num_authority_levels", 1),
+        num_tool_names=config.get("num_tool_names", 1),
+        num_route_steps=config.get("num_route_steps", 8),
         max_seq_len=config.get("max_seq_len", 256),
     ).to(device)
     model.load_state_dict(checkpoint["model_state"])
@@ -449,10 +466,10 @@ def encode_event_tensor(
 def value_vector_for_op(
     model: StatefulTransformer,
     dataset: TraceDataset,
-    op_value: str,
+    op,
     device: str,
 ) -> torch.Tensor:
-    value_ids = dataset.vocab.encode(tokenize_text(op_value)) or [0]
+    value_ids = dataset.vocab.encode(tokenize_text(memory_text_from_op(op))) or [0]
     value_tokens = torch.tensor([value_ids], dtype=torch.long, device=device)
     value_mask = torch.ones_like(value_tokens, dtype=torch.bool)
     return mean_value_embedding(model.transformer.embed, value_tokens, value_mask)[0].detach()
@@ -479,7 +496,7 @@ def apply_teacher_op(
                 memory.apply_delete(0, slot)
                 return
         return
-    vector = value_vector_for_op(model, dataset, op.value, device)
+    vector = value_vector_for_op(model, dataset, op, device)
     if op.op == MemoryOpName.UPDATE and bool(memory.occupied[0, slot_idx].item()):
         memory.apply_update(0, slot_idx, vector)
         return
@@ -525,7 +542,7 @@ def apply_predicted_op(
         and target_op is not None
         and device
     ):
-        vector = value_vector_for_op(model, dataset, target_op.value, device)
+        vector = value_vector_for_op(model, dataset, target_op, device)
     else:
         vector = outputs["value_vector"][0].detach()
     scope_id = (

@@ -11,7 +11,12 @@ from itertools import islice
 import torch
 from tqdm import tqdm
 
-from hotbob.llm.dataset import LLMTrace, build_llm_scope_vocab, read_llm_jsonl
+from hotbob.llm.dataset import (
+    LLMTrace,
+    build_llm_scope_vocab,
+    build_llm_tool_name_vocab,
+    read_llm_jsonl,
+)
 from hotbob.llm.prompts import ANSWER_SET
 from hotbob.llm.qwen_memory_model import QwenMemoryConfig, QwenMemoryModel
 
@@ -87,6 +92,13 @@ def evaluate_traces(
     leaks = 0
     wrong_scope_failures = 0
     expiry_failures = 0
+    authority_conflict_failures = 0
+    tool_override_failures = 0
+    interruption_failures = 0
+    stale_state_failures = 0
+    privacy_disclosure_failures = 0
+    tool_routing_failures = 0
+    structured_policy_failures = 0
     families: Counter[str] = Counter()
     family_correct: Counter[str] = Counter()
     with torch.inference_mode():
@@ -118,6 +130,23 @@ def evaluate_traces(
                     wrong_scope_failures += 1
                 if family == "expiry" and not ok:
                     expiry_failures += 1
+                if family == "active_expiry" and not ok:
+                    structured_policy_failures += 1
+                    expiry_failures += 1
+                if family == "standing_order" and not ok:
+                    structured_policy_failures += 1
+                if family == "authority_conflict" and not ok:
+                    authority_conflict_failures += 1
+                if family == "tool_verified_override" and not ok:
+                    tool_override_failures += 1
+                if family == "interrupted_task" and not ok:
+                    interruption_failures += 1
+                if family == "stale_state_replacement" and not ok:
+                    stale_state_failures += 1
+                if family == "privacy_disclosure_conflict" and not ok:
+                    privacy_disclosure_failures += 1
+                if family == "multi_step_tool_routing" and not ok:
+                    tool_routing_failures += 1
     total = len(traces)
     result: dict[str, float | int | str] = {
         "mode": mode,
@@ -129,6 +158,13 @@ def evaluate_traces(
         "secret_leak_failures": leaks,
         "wrong_scope_failures": wrong_scope_failures,
         "expiry_failures": expiry_failures,
+        "authority_conflict_failures": authority_conflict_failures,
+        "tool_override_failures": tool_override_failures,
+        "interruption_failures": interruption_failures,
+        "stale_state_failures": stale_state_failures,
+        "privacy_disclosure_failures": privacy_disclosure_failures,
+        "tool_routing_failures": tool_routing_failures,
+        "structured_policy_failures": structured_policy_failures,
     }
     for family, count in families.items():
         result[f"{family}_accuracy"] = family_correct[family] / count
@@ -173,6 +209,7 @@ def main() -> None:
     config_kwargs = {
         "model_name": args.model,
         "scope_vocab": build_llm_scope_vocab(traces),
+        "tool_name_vocab": build_llm_tool_name_vocab(traces),
     }
     if args.checkpoint:
         state = torch.load(args.checkpoint, map_location="cpu", weights_only=False)

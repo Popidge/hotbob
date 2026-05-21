@@ -81,6 +81,18 @@ type before readout. This mirrors the multi-state motivation from delta-mem in
 HotBob terms: reduce interference by separating operational memory categories.
 It is scaffolding for later experiments, not a tuned result.
 
+## Typed Payload Roadmap
+
+1. Structured trace targets: rich `MemoryOp.payload` schemas and supervised
+   payload heads for policy/action/trigger/expiry/authority/tool-route fields.
+2. q/o middle/all-layer correction: broaden the current last-layer comparison
+   into deeper layer placement and type-grouped correction experiments.
+3. Native memory read/write gates inside transformer blocks: move beyond prefix
+   and residual correction into architecture-native operational memory.
+4. Train-from-zero deeply integrated memory architecture: test whether memory
+   mechanisms become more reliable when learned as part of the backbone rather
+   than attached to a frozen decoder.
+
 ## Attribution
 
 This experiment adapts ideas from:

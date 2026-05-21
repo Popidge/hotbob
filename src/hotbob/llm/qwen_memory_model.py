@@ -8,7 +8,7 @@ from typing import Any
 import torch
 from torch import nn
 
-from hotbob.llm.dataset import LLMTrace
+from hotbob.llm.dataset import LLMTrace, build_llm_tool_name_vocab
 from hotbob.llm.env import load_dotenv
 from hotbob.llm.memory_adapter import (
     LQwenMemoryHeads,
@@ -23,6 +23,7 @@ from hotbob.training.dataset import (
     PRIVACY_TO_ID,
     TYPE_TO_ID,
     build_scope_vocab,
+    structured_targets_from_payload,
 )
 from hotbob.types import MemoryOpName, MemoryPrivacy, TaskTrace
 
@@ -38,6 +39,9 @@ class QwenMemoryConfig:
     correction_rank: int = 16
     attention_patch_layers: str = "all"
     num_value_classes: int = 64
+    structured_loss_weight: float = 0.2
+    tool_name_vocab: dict[str, int] = field(default_factory=dict)
+    num_route_steps: int = 8
     device: str = "auto"
     torch_dtype: str = "auto"
     scope_vocab: dict[str, int] = field(default_factory=lambda: {"default": 1})
@@ -68,6 +72,8 @@ class QwenMemoryModel(nn.Module):
             self.config_obj.num_memory_slots,
             max(self.config_obj.scope_vocab.values(), default=0) + 1,
             self.config_obj.num_value_classes,
+            max(self.config_obj.tool_name_vocab.values(), default=0) + 1,
+            self.config_obj.num_route_steps,
             self.config_obj.memory_prefix_len,
             self.config_obj.correction_rank,
             self.config_obj.memory_state_mode,
@@ -655,6 +661,52 @@ class QwenMemoryModel(nn.Module):
                 "MEMORY_VALUE", target_op.value, target_op.scope
             )[0].float()
             losses.append(nn.functional.mse_loss(predicted_value, target_value))
+            structured = structured_targets_from_payload(
+                target_op.payload, self.config_obj.tool_name_vocab
+            )
+            structured_losses: list[torch.Tensor] = []
+            structured_specs = [
+                ("payload_kind_logits", "payload_kind_id", "has_payload"),
+                (
+                    "payload_default_action_logits",
+                    "default_action_id",
+                    "has_default_action",
+                ),
+                ("payload_trigger_logits", "trigger_id", "has_trigger"),
+                ("payload_exception_logits", "exception_id", "exception_id"),
+                (
+                    "payload_expiry_policy_logits",
+                    "expiry_policy_id",
+                    "has_expiry_policy",
+                ),
+                (
+                    "payload_authority_level_logits",
+                    "authority_level_id",
+                    "has_authority_level",
+                ),
+                ("payload_tool_name_logits", "tool_name_id", "has_tool_name"),
+                ("payload_route_step_logits", "route_step_id", "has_route_step"),
+            ]
+            for logits_key, target_key, mask_key in structured_specs:
+                target_id = int(structured[target_key])
+                has_target = (
+                    bool(structured[mask_key])
+                    if isinstance(structured.get(mask_key), bool)
+                    else target_id > 0
+                )
+                if not has_target:
+                    continue
+                logits = outputs[logits_key]
+                target_id = min(target_id, logits.shape[-1] - 1)
+                target_tensor = torch.tensor(
+                    [target_id], dtype=torch.long, device=self._device()
+                )
+                structured_losses.append(nn.functional.cross_entropy(logits, target_tensor))
+            if structured_losses:
+                losses.append(
+                    self.config_obj.structured_loss_weight
+                    * torch.stack(structured_losses).mean()
+                )
             op_index += 1
         if not losses:
             return torch.zeros((), device=self._device(), requires_grad=True)
@@ -741,7 +793,22 @@ class QwenMemoryModel(nn.Module):
 
     @staticmethod
     def config_from_task_traces(traces: list[TaskTrace], **kwargs: Any) -> QwenMemoryConfig:
-        return QwenMemoryConfig(scope_vocab=build_scope_vocab(traces), **kwargs)
+        llm_like = [
+            LLMTrace(
+                events=[],
+                final_prompt="",
+                target_text="",
+                target_action="",
+                current_scope=trace.current_scope,
+                expected_memory_ops=trace.expected_memory_ops,
+            )
+            for trace in traces
+        ]
+        return QwenMemoryConfig(
+            scope_vocab=build_scope_vocab(traces),
+            tool_name_vocab=build_llm_tool_name_vocab(llm_like),
+            **kwargs,
+        )
 
     def run_trace_teacher_forced(self, trace: LLMTrace) -> str:
         self.apply_teacher_trace_memory(trace)
