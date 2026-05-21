@@ -5,6 +5,7 @@ import torch
 from torch import nn
 
 from hotbob.data.traces import generate_traces
+from hotbob.experiment import checkpoint_payload
 from hotbob.llm.architecture_compare import (
     bucket_losses,
     parse_variant,
@@ -15,6 +16,8 @@ from hotbob.llm.architecture_compare import (
 )
 from hotbob.llm.compare import comparison_rows, parse_checkpoints
 from hotbob.llm.dataset import (
+    build_llm_scope_vocab,
+    build_llm_tool_name_vocab,
     generate_llm_traces,
     privacy_report,
     task_trace_to_llm_trace,
@@ -29,6 +32,7 @@ from hotbob.llm.evaluate import (
     extract_allowed_answer,
     normalize_generated_text,
 )
+from hotbob.llm.evaluate import main as llm_eval_main
 from hotbob.llm.generate_data import main as generate_llm_main
 from hotbob.llm.memory_adapter import LowRankMemoryCorrectionAdapter, MemoryPrefixAdapter
 from hotbob.llm.qwen_memory_model import QwenMemoryConfig, QwenMemoryModel
@@ -179,6 +183,25 @@ def tiny_train_model(config: QwenMemoryConfig) -> QwenMemoryModel:
     return QwenMemoryModel(config, base_model=TinyCausalLM(), tokenizer=TinyTokenizer())
 
 
+class TinyLoRAMemoryModel(QwenMemoryModel):
+    def _maybe_apply_lora(self) -> None:
+        self.base_model.lora_probe = nn.Parameter(torch.ones(1))
+
+    def teacher_forced_lm_loss(self, trace) -> torch.Tensor:
+        return self.base_model.lora_probe.sum()
+
+    def lora_state_dict(self) -> dict[str, torch.Tensor]:
+        return {"lora_probe": self.base_model.lora_probe.detach().clone()}
+
+    def load_lora_state_dict(self, state: dict[str, torch.Tensor]) -> None:
+        with torch.no_grad():
+            self.base_model.lora_probe.copy_(state["lora_probe"])
+
+
+def tiny_lora_model(config: QwenMemoryConfig) -> TinyLoRAMemoryModel:
+    return TinyLoRAMemoryModel(config, base_model=TinyCausalLM(), tokenizer=TinyTokenizer())
+
+
 def test_llm_trace_conversion_preserves_privacy_and_scope_metadata() -> None:
     task_trace = next(
         t for t in generate_traces(20, seed=4) if t.task_family == "privacy_disclosure_conflict"
@@ -237,6 +260,48 @@ def test_frozen_base_parameters_have_requires_grad_false() -> None:
     model = tiny_memory_model()
     assert all(not param.requires_grad for param in model.base_model.parameters())
     assert any(param.requires_grad for param in model.memory_heads.parameters())
+
+
+def test_qwen_memory_config_lora_defaults_to_none() -> None:
+    config = QwenMemoryConfig()
+    assert config.lora_backend == "none"
+    assert config.lora_target_modules == ("q_proj", "k_proj", "v_proj", "o_proj")
+
+
+def test_peft_missing_raises_only_when_lora_requested(monkeypatch) -> None:
+    import builtins
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "peft":
+            raise ImportError("missing peft")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    QwenMemoryModel(
+        QwenMemoryConfig(lora_backend="none"),
+        base_model=TinyCausalLM(),
+        tokenizer=TinyTokenizer(),
+    )
+    with pytest.raises(RuntimeError, match="Install peft"):
+        QwenMemoryModel(
+            QwenMemoryConfig(lora_backend="peft"),
+            base_model=TinyCausalLM(),
+            tokenizer=TinyTokenizer(),
+        )
+
+
+def test_checkpoint_payload_can_include_lora_state() -> None:
+    payload = checkpoint_payload(
+        config={"integration_mode": "prefix"},
+        memory_heads_state={"head": torch.tensor([1.0])},
+        lora_state={"lora_probe": torch.tensor([2.0])},
+        losses=[1.0],
+        training_args={},
+    )
+    assert "lora_state" in payload
+    assert torch.equal(payload["lora_state"]["lora_probe"], torch.tensor([2.0]))
 
 
 def test_teacher_forced_memory_changes_generated_logits_versus_context_only() -> None:
@@ -381,6 +446,30 @@ def test_llm_train_and_evaluate_argument_parsing_accept_attention_modes() -> Non
     assert train_args.attention_patch_layers == "last4"
     assert train_args.freeze_base
     assert train_args.structured_loss_weight == 0.2
+    assert train_args.memory_heads_checkpoint is None
+    assert not train_args.freeze_memory_heads
+    assert train_args.lora_backend == "none"
+    lora_args = build_train_arg_parser().parse_args(
+        [
+            "--traces",
+            "data/llm_train.jsonl",
+            "--memory-heads-checkpoint",
+            "runs/qwen_memory/controller.pt",
+            "--freeze-memory-heads",
+            "--lora-backend",
+            "peft",
+            "--lora-r",
+            "8",
+            "--lora-target-modules",
+            "q_proj",
+            "o_proj",
+        ]
+    )
+    assert lora_args.lora_backend == "peft"
+    assert lora_args.lora_r == 8
+    assert lora_args.lora_target_modules == ["q_proj", "o_proj"]
+    assert lora_args.memory_heads_checkpoint == "runs/qwen_memory/controller.pt"
+    assert lora_args.freeze_memory_heads
 
     eval_args = build_eval_arg_parser().parse_args(
         [
@@ -511,6 +600,61 @@ def test_llm_train_batch_size_two_writes_checkpoint(tmp_path, monkeypatch) -> No
     assert len(state["losses"]) == 1
 
 
+def test_llm_train_can_load_and_freeze_memory_heads_for_lora_stage(tmp_path, monkeypatch) -> None:
+    traces = [task_trace_to_llm_trace(trace) for trace in generate_traces(2, seed=11)]
+    trace_path = tmp_path / "llm_train.jsonl"
+    memory_checkpoint = tmp_path / "memory.pt"
+    out_path = tmp_path / "lora_stage.pt"
+    write_llm_jsonl(traces, trace_path)
+    model = tiny_lora_model(
+        QwenMemoryConfig(
+            scope_vocab=build_llm_scope_vocab(traces),
+            tool_name_vocab=build_llm_tool_name_vocab(traces),
+            lora_backend="peft",
+        )
+    )
+    torch.save(
+        checkpoint_payload(
+            config={**model.config_obj.__dict__},
+            memory_heads_state=model.memory_heads.state_dict(),
+            losses=[0.5],
+            training_args={},
+        ),
+        memory_checkpoint,
+    )
+    monkeypatch.setattr("hotbob.llm.train.QwenMemoryModel", tiny_lora_model)
+    args = build_train_arg_parser().parse_args(
+        [
+            "--model",
+            "tiny",
+            "--traces",
+            str(trace_path),
+            "--steps",
+            "1",
+            "--batch-size",
+            "1",
+            "--integration-mode",
+            "prefix",
+            "--freeze-base",
+            "--memory-heads-checkpoint",
+            str(memory_checkpoint),
+            "--freeze-memory-heads",
+            "--lora-backend",
+            "peft",
+            "--write-loss-weight",
+            "0",
+            "--out",
+            str(out_path),
+        ]
+    )
+    from hotbob.llm.train import train_checkpoint
+
+    train_checkpoint(args)
+    state = torch.load(out_path, map_location="cpu", weights_only=False)
+    assert state["training_args"]["freeze_memory_heads"]
+    assert "lora_state" in state
+
+
 def test_llm_compare_context_only_json_rows(monkeypatch) -> None:
     traces = [task_trace_to_llm_trace(trace) for trace in generate_traces(2, seed=9)]
     monkeypatch.setattr(
@@ -529,6 +673,86 @@ def test_llm_compare_context_only_json_rows(monkeypatch) -> None:
     assert rows[0]["eval_mode"] == "context_only"
     assert "aggregate_accuracy" in rows[0]
     assert "tool_routing_failures" in rows[0]
+    assert rows[0]["lora_backend"] == "none"
+    assert rows[0]["lora_r"] == 16
+    assert rows[0]["lora_target_modules"] == ["q_proj", "k_proj", "v_proj", "o_proj"]
+
+
+def test_compare_loads_memory_and_lora_checkpoint(tmp_path, monkeypatch) -> None:
+    traces = [task_trace_to_llm_trace(trace) for trace in generate_traces(1, seed=9)]
+    checkpoint_path = tmp_path / "lora.pt"
+    model = tiny_lora_model(
+        QwenMemoryConfig(
+            num_memory_slots=4,
+            memory_prefix_len=3,
+            correction_rank=4,
+            lora_backend="peft",
+            lora_r=4,
+            lora_target_modules=("q_proj",),
+        )
+    )
+    torch.save(
+        checkpoint_payload(
+            config={**model.config_obj.__dict__},
+            memory_heads_state=model.memory_heads.state_dict(),
+            lora_state={"lora_probe": torch.tensor([5.0])},
+            losses=[0.5],
+            training_args={},
+        ),
+        checkpoint_path,
+    )
+    monkeypatch.setattr("hotbob.llm.compare.QwenMemoryModel", tiny_lora_model)
+    rows = comparison_rows(
+        traces=traces,
+        model_name="tiny",
+        checkpoints={"prefix_lora": str(checkpoint_path)},
+        modes=["context_only"],
+        decode_strategy="score_answers",
+        batch_size=1,
+    )
+    assert rows[0]["lora_backend"] == "peft"
+    assert rows[0]["lora_r"] == 4
+    assert rows[0]["lora_target_modules"] == ["q_proj"]
+
+
+def test_evaluate_loads_memory_and_lora_checkpoint(tmp_path, monkeypatch) -> None:
+    traces = [task_trace_to_llm_trace(trace) for trace in generate_traces(1, seed=9)]
+    trace_path = tmp_path / "llm_eval.jsonl"
+    checkpoint_path = tmp_path / "lora.pt"
+    write_llm_jsonl(traces, trace_path)
+    model = tiny_lora_model(
+        QwenMemoryConfig(
+            num_memory_slots=4,
+            memory_prefix_len=3,
+            correction_rank=4,
+            lora_backend="peft",
+            lora_target_modules=("q_proj",),
+        )
+    )
+    torch.save(
+        checkpoint_payload(
+            config={**model.config_obj.__dict__},
+            memory_heads_state=model.memory_heads.state_dict(),
+            lora_state={"lora_probe": torch.tensor([7.0])},
+            losses=[0.5],
+            training_args={},
+        ),
+        checkpoint_path,
+    )
+    monkeypatch.setattr("hotbob.llm.evaluate.QwenMemoryModel", tiny_lora_model)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "evaluate",
+            "--checkpoint",
+            str(checkpoint_path),
+            "--traces",
+            str(trace_path),
+            "--mode",
+            "context_only",
+        ],
+    )
+    llm_eval_main()
 
 
 def test_architecture_compare_parses_variants_and_buckets_losses() -> None:

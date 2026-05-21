@@ -158,6 +158,134 @@ uv run python -m hotbob.llm.architecture_compare \
   --variant attention_qo:by_type:last4
 ```
 
+## Prefix+LoRA Memory Reader Experiment
+
+The `experiment/prefix-lora-memory-reader` branch tests whether a small PEFT
+LoRA adapter on Qwen can learn to consume HotBob's structured memory-prefix
+embeddings better than frozen Qwen. The memory controller, prefix adapter, write
+supervision, and answer loss stay intact; training optimizes HotBob memory heads
+plus Qwen LoRA weights while the base Qwen weights remain frozen.
+
+PEFT is the first backend because it is the clean reference implementation for
+the current custom loop, which already trains through `inputs_embeds` with
+memory-prefix attachment and write supervision. Unsloth is intentionally left as
+a later backend once the PEFT baseline is proven.
+
+Generate the comparison data:
+
+```bash
+uv run python -m hotbob.llm.generate_data \
+  --train-out data/llm_rich_lora_train_50000.jsonl \
+  --eval-out data/llm_rich_lora_eval_5000.jsonl \
+  --train-n 50000 \
+  --eval-n 5000 \
+  --seed 7
+```
+
+Train the frozen-prefix baseline:
+
+```bash
+uv run python -m hotbob.llm.train \
+  --model Qwen/Qwen2.5-0.5B-Instruct \
+  --traces data/llm_rich_lora_train_50000.jsonl \
+  --steps 10000 \
+  --batch-size 1 \
+  --integration-mode prefix \
+  --freeze-base \
+  --structured-loss-weight 0.2 \
+  --out runs/qwen_memory/prefix_frozen_50k_10k.pt
+```
+
+Train prefix+LoRA:
+
+```bash
+uv run python -m hotbob.llm.train \
+  --model Qwen/Qwen2.5-0.5B-Instruct \
+  --traces data/llm_rich_lora_train_50000.jsonl \
+  --steps 10000 \
+  --batch-size 1 \
+  --integration-mode prefix \
+  --freeze-base \
+  --structured-loss-weight 0.2 \
+  --lora-backend peft \
+  --lora-r 16 \
+  --lora-alpha 32 \
+  --lora-dropout 0.05 \
+  --lora-target-modules q_proj k_proj v_proj o_proj \
+  --memory-lr 1e-4 \
+  --lora-lr 2e-4 \
+  --out runs/qwen_memory/prefix_lora_50k_10k.pt
+```
+
+For a stricter contamination check, train the memory controller and LoRA on
+separate data. First train or reuse a frozen-prefix memory-controller checkpoint,
+then train LoRA on a different trace file while loading and freezing those
+memory heads:
+
+```bash
+uv run python -m hotbob.llm.train \
+  --model Qwen/Qwen2.5-0.5B-Instruct \
+  --traces data/llm_rich_lora_train_lora.jsonl \
+  --steps 10000 \
+  --batch-size 1 \
+  --integration-mode prefix \
+  --freeze-base \
+  --memory-heads-checkpoint runs/qwen_memory/prefix_memory_controller.pt \
+  --freeze-memory-heads \
+  --write-loss-weight 0 \
+  --lora-backend peft \
+  --lora-r 16 \
+  --lora-alpha 32 \
+  --lora-dropout 0.05 \
+  --lora-target-modules q_proj k_proj v_proj o_proj \
+  --lora-lr 2e-4 \
+  --out runs/qwen_memory/prefix_lora_split_10k.pt
+```
+
+Compare aggregate behavior:
+
+```bash
+uv run python -m hotbob.llm.compare \
+  --traces data/llm_rich_lora_eval_5000.jsonl \
+  --checkpoints \
+    prefix_frozen=runs/qwen_memory/prefix_frozen_50k_10k.pt \
+    prefix_lora=runs/qwen_memory/prefix_lora_50k_10k.pt \
+  --modes predicted context_only teacher_forced \
+  --decode-strategy score_answers \
+  --batch-size 1 \
+  --out runs/qwen_memory/prefix_lora_comparison.json
+```
+
+`prefix_lora / context_only` is the memory-ablated result: the same LoRA
+checkpoint is active, but memory is reset/unused and evaluated with
+`use_memory=False`. This distinguishes memory use from prompt-pattern learning.
+
+Generate authority-focused reports:
+
+```bash
+uv run python -m hotbob.llm.authority_report \
+  --checkpoint runs/qwen_memory/prefix_lora_50k_10k.pt \
+  --traces data/llm_rich_lora_eval_5000.jsonl \
+  --mode predicted \
+  --decode-strategy score_answers \
+  --out runs/qwen_memory/prefix_lora_authority_predicted.json
+
+uv run python -m hotbob.llm.authority_report \
+  --checkpoint runs/qwen_memory/prefix_frozen_50k_10k.pt \
+  --traces data/llm_rich_lora_eval_5000.jsonl \
+  --mode predicted \
+  --decode-strategy score_answers \
+  --out runs/qwen_memory/prefix_frozen_authority_predicted.json
+```
+
+Success criteria:
+
+- teacher-forced authority conflict accuracy `>= 0.65`
+- predicted authority conflict accuracy `>= 0.40`
+- `secret_leak_failures == 0`
+- `prefix_lora / context_only` remains materially lower than
+  `prefix_lora / predicted`
+
 ## Delta-HotBob
 
 `docs/delta_hotbob.md` describes the delta-HotBob experiment inspired by

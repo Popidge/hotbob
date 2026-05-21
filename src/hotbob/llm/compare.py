@@ -70,6 +70,8 @@ def load_model(
             model.memory_heads.load_state_dict(state["memory_heads_state"], strict=False)
         else:
             model.load_state_dict(state["model_state"], strict=False)
+        if state.get("lora_state"):
+            model.load_lora_state_dict(state["lora_state"])
     return model, state or {}
 
 
@@ -126,6 +128,9 @@ def comparison_rows(
             row = {
                 "run_name": run_name,
                 "integration_mode": model.config_obj.integration_mode,
+                "lora_backend": model.config_obj.lora_backend,
+                "lora_r": model.config_obj.lora_r,
+                "lora_target_modules": list(model.config_obj.lora_target_modules),
                 "checkpoint_path": checkpoint_path,
                 "eval_mode": mode,
                 "decode_strategy": decode_strategy,

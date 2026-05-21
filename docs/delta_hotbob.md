@@ -93,6 +93,30 @@ It is scaffolding for later experiments, not a tuned result.
    mechanisms become more reliable when learned as part of the backbone rather
    than attached to a frozen decoder.
 
+## Prefix+LoRA Memory Reader Experiment
+
+The structured memory controller is now strong enough to isolate the LLM
+integration question: can Qwen consume HotBob memory-prefix embeddings reliably
+when the decoder is allowed a small adapter rather than being fully frozen?
+
+The frozen-prefix baseline validates the memory route but still struggles on
+authority semantics. Prefix+LoRA keeps the same structured memory writes and
+prefix adapter, freezes the base Qwen weights, and trains only HotBob memory
+heads plus PEFT LoRA weights on Qwen attention projections. The memory-ablated
+comparison is the same LoRA checkpoint evaluated in `context_only`, so memory is
+disabled while prompt priors and LoRA weights remain active.
+
+If `context_only` rises with `predicted` and `teacher_forced`, treat that as
+prompt-pattern contamination rather than memory use. The stricter follow-up is a
+two-stage split: train memory heads on one trace split, load and freeze them,
+then train only LoRA on a separate trace split before evaluating on a third
+split.
+
+This experiment is deliberately before q/o and native memory gates. q/o
+correction and native transformer memory remain later integration experiments
+after the prefix+LoRA baseline establishes whether a small decoder adapter can
+learn to read the existing memory-prefix channel.
+
 ## Attribution
 
 This experiment adapts ideas from:

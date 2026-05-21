@@ -40,9 +40,10 @@ def checkpoint_payload(
     memory_heads_state: dict[str, Any],
     losses: list[float],
     training_args: dict[str, Any],
+    lora_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     config_dict = asdict(config) if isinstance(config, ExperimentConfig) else dict(config)
-    return {
+    payload = {
         "memory_heads_state": memory_heads_state,
         "config": config_dict,
         "git_commit": _git_commit(),
@@ -52,3 +53,6 @@ def checkpoint_payload(
         "mean_loss": sum(losses) / len(losses) if losses else None,
         "training_args": training_args,
     }
+    if lora_state is not None:
+        payload["lora_state"] = lora_state
+    return payload

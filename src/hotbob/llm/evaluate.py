@@ -230,6 +230,8 @@ def main() -> None:
             model.memory_heads.load_state_dict(state["memory_heads_state"], strict=False)
         else:
             model.load_state_dict(state["model_state"], strict=False)
+        if state.get("lora_state"):
+            model.load_lora_state_dict(state["lora_state"])
     modes: Iterable[str] = (
         ["context_only", "teacher_forced", "predicted"] if args.mode == "all" else [args.mode]
     )
