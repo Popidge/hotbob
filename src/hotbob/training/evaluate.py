@@ -27,6 +27,7 @@ from hotbob.training.dataset import (
     collate_traces,
     memory_text_from_op,
     normalize_scope,
+    structured_targets_from_payload,
     tokenize_text,
 )
 from hotbob.training.memory_teacher import (
@@ -338,6 +339,10 @@ def evaluate_neural(
                     scope_ids=batch["scope_ids"],
                     privacy_ids=batch["privacy_ids"],
                     authority_ids=batch["authority_ids"],
+                    payload_kind_ids=batch["payload_kind_ids"],
+                    payload_default_action_ids=batch["default_action_ids"],
+                    payload_winning_authority_level_ids=batch["winning_authority_level_ids"],
+                    payload_losing_authority_level_ids=batch["losing_authority_level_ids"],
                     num_memory_slots=config["num_memory_slots"],
                     d_model=config["d_model"],
                     device=device,
@@ -499,7 +504,17 @@ def apply_teacher_op(
     vector = value_vector_for_op(model, dataset, op, device)
     if op.op == MemoryOpName.UPDATE and bool(memory.occupied[0, slot_idx].item()):
         memory.apply_update(0, slot_idx, vector)
+        structured = structured_targets_from_payload(op.payload, dataset.tool_name_vocab)
+        memory.payload_kind_ids[0, slot_idx] = int(structured["payload_kind_id"])
+        memory.payload_default_action_ids[0, slot_idx] = int(structured["default_action_id"])
+        memory.payload_winning_authority_level_ids[0, slot_idx] = int(
+            structured["winning_authority_level_id"]
+        )
+        memory.payload_losing_authority_level_ids[0, slot_idx] = int(
+            structured["losing_authority_level_id"]
+        )
         return
+    structured = structured_targets_from_payload(op.payload, dataset.tool_name_vocab)
     memory.apply_write(
         0,
         slot_idx,
@@ -508,6 +523,10 @@ def apply_teacher_op(
         scope_id=dataset.scope_vocab.get(normalize_scope(op.scope), 0),
         privacy_id=PRIVACY_TO_ID[op.privacy],
         authority_id=AUTHORITY_TO_ID[op.authority],
+        payload_kind_id=int(structured["payload_kind_id"]),
+        payload_default_action_id=int(structured["default_action_id"]),
+        payload_winning_authority_level_id=int(structured["winning_authority_level_id"]),
+        payload_losing_authority_level_id=int(structured["losing_authority_level_id"]),
     )
 
 
@@ -554,6 +573,18 @@ def apply_predicted_op(
         memory.apply_update(
             0, selected_slot, vector, gate=float(outputs["write_gate"][0, 0].item())
         )
+        memory.payload_kind_ids[0, selected_slot] = int(
+            outputs["payload_kind_logits"].argmax(dim=-1)[0].item()
+        )
+        memory.payload_default_action_ids[0, selected_slot] = int(
+            outputs["payload_default_action_logits"].argmax(dim=-1)[0].item()
+        )
+        memory.payload_winning_authority_level_ids[0, selected_slot] = int(
+            outputs["payload_winning_authority_level_logits"].argmax(dim=-1)[0].item()
+        )
+        memory.payload_losing_authority_level_ids[0, selected_slot] = int(
+            outputs["payload_losing_authority_level_logits"].argmax(dim=-1)[0].item()
+        )
         return
     memory.apply_write(
         0,
@@ -563,6 +594,16 @@ def apply_predicted_op(
         scope_id=scope_id,
         privacy_id=int(outputs["privacy_logits"].argmax(dim=-1)[0].item()),
         authority_id=int(outputs["authority_logits"].argmax(dim=-1)[0].item()),
+        payload_kind_id=int(outputs["payload_kind_logits"].argmax(dim=-1)[0].item()),
+        payload_default_action_id=int(
+            outputs["payload_default_action_logits"].argmax(dim=-1)[0].item()
+        ),
+        payload_winning_authority_level_id=int(
+            outputs["payload_winning_authority_level_logits"].argmax(dim=-1)[0].item()
+        ),
+        payload_losing_authority_level_id=int(
+            outputs["payload_losing_authority_level_logits"].argmax(dim=-1)[0].item()
+        ),
         strength=float(outputs["write_gate"][0, 0].item()),
     )
 

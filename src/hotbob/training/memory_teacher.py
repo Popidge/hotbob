@@ -27,6 +27,10 @@ def build_teacher_forced_memory(
     scope_ids: torch.Tensor,
     privacy_ids: torch.Tensor,
     authority_ids: torch.Tensor,
+    payload_kind_ids: torch.Tensor | None = None,
+    payload_default_action_ids: torch.Tensor | None = None,
+    payload_winning_authority_level_ids: torch.Tensor | None = None,
+    payload_losing_authority_level_ids: torch.Tensor | None = None,
     num_memory_slots: int,
     d_model: int,
     device: torch.device | str,
@@ -49,6 +53,16 @@ def build_teacher_forced_memory(
             scope_id=int(scope_ids[row].item()),
             privacy_id=int(privacy_ids[row].item()),
             authority_id=int(authority_ids[row].item()),
+            payload_kind_id=int(payload_kind_ids[row].item()) if payload_kind_ids is not None else 0,
+            payload_default_action_id=int(payload_default_action_ids[row].item())
+            if payload_default_action_ids is not None
+            else 0,
+            payload_winning_authority_level_id=int(payload_winning_authority_level_ids[row].item())
+            if payload_winning_authority_level_ids is not None
+            else 0,
+            payload_losing_authority_level_id=int(payload_losing_authority_level_ids[row].item())
+            if payload_losing_authority_level_ids is not None
+            else 0,
         )
     return memory
 
@@ -70,6 +84,14 @@ def build_predicted_memory(
     scope_ids = outputs["scope_logits"].argmax(dim=-1)
     privacy_ids = outputs["privacy_logits"].argmax(dim=-1)
     authority_ids = outputs["authority_logits"].argmax(dim=-1)
+    payload_kind_ids = outputs["payload_kind_logits"].argmax(dim=-1)
+    payload_default_action_ids = outputs["payload_default_action_logits"].argmax(dim=-1)
+    payload_winning_authority_level_ids = outputs[
+        "payload_winning_authority_level_logits"
+    ].argmax(dim=-1)
+    payload_losing_authority_level_ids = outputs[
+        "payload_losing_authority_level_logits"
+    ].argmax(dim=-1)
     gates = outputs["write_gate"].squeeze(-1)
     for row in range(batch_size):
         memory.apply_write(
@@ -80,6 +102,12 @@ def build_predicted_memory(
             scope_id=int(scope_ids[row].item()),
             privacy_id=int(privacy_ids[row].item()),
             authority_id=int(authority_ids[row].item()),
+            payload_kind_id=int(payload_kind_ids[row].item()),
+            payload_default_action_id=int(payload_default_action_ids[row].item()),
+            payload_winning_authority_level_id=int(
+                payload_winning_authority_level_ids[row].item()
+            ),
+            payload_losing_authority_level_id=int(payload_losing_authority_level_ids[row].item()),
             strength=float(gates[row].item()),
         )
     return memory

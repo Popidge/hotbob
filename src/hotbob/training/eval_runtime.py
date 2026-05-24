@@ -14,6 +14,7 @@ from hotbob.training.dataset import (
     TraceVocab,
     memory_text_from_op,
     normalize_scope,
+    structured_targets_from_payload,
     tokenize_text,
 )
 from hotbob.training.memory_teacher import mean_value_embedding
@@ -109,7 +110,17 @@ def apply_teacher_op(
     vector = value_vector_for_op(model, dataset, op, device)
     if op.op == MemoryOpName.UPDATE and bool(memory.occupied[0, slot_idx].item()):
         memory.apply_update(0, slot_idx, vector)
+        structured = structured_targets_from_payload(op.payload, dataset.tool_name_vocab)
+        memory.payload_kind_ids[0, slot_idx] = int(structured["payload_kind_id"])
+        memory.payload_default_action_ids[0, slot_idx] = int(structured["default_action_id"])
+        memory.payload_winning_authority_level_ids[0, slot_idx] = int(
+            structured["winning_authority_level_id"]
+        )
+        memory.payload_losing_authority_level_ids[0, slot_idx] = int(
+            structured["losing_authority_level_id"]
+        )
         return
+    structured = structured_targets_from_payload(op.payload, dataset.tool_name_vocab)
     memory.apply_write(
         0,
         slot_idx,
@@ -118,6 +129,10 @@ def apply_teacher_op(
         scope_id=dataset.scope_vocab.get(normalize_scope(op.scope), 0),
         privacy_id=PRIVACY_TO_ID[op.privacy],
         authority_id=AUTHORITY_TO_ID[op.authority],
+        payload_kind_id=int(structured["payload_kind_id"]),
+        payload_default_action_id=int(structured["default_action_id"]),
+        payload_winning_authority_level_id=int(structured["winning_authority_level_id"]),
+        payload_losing_authority_level_id=int(structured["losing_authority_level_id"]),
     )
 
 

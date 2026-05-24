@@ -115,6 +115,10 @@ def apply_teacher_event_ops(
     scope_ids: torch.Tensor,
     privacy_ids: torch.Tensor,
     authority_ids: torch.Tensor,
+    payload_kind_ids: torch.Tensor,
+    payload_default_action_ids: torch.Tensor,
+    payload_winning_authority_level_ids: torch.Tensor,
+    payload_losing_authority_level_ids: torch.Tensor,
     write_mask: torch.Tensor,
 ) -> None:
     if not bool(write_mask.any().item()):
@@ -133,6 +137,16 @@ def apply_teacher_event_ops(
             memory.apply_delete(row, slot)
         elif op_id == OP_TO_ID[MemoryOpName.UPDATE] and bool(memory.occupied[row, slot].item()):
             memory.apply_update(row, slot, value_vectors[vector_idx])
+            memory.payload_kind_ids[row, slot] = int(payload_kind_ids[row].item())
+            memory.payload_default_action_ids[row, slot] = int(
+                payload_default_action_ids[row].item()
+            )
+            memory.payload_winning_authority_level_ids[row, slot] = int(
+                payload_winning_authority_level_ids[row].item()
+            )
+            memory.payload_losing_authority_level_ids[row, slot] = int(
+                payload_losing_authority_level_ids[row].item()
+            )
         else:
             memory.apply_write(
                 row,
@@ -142,6 +156,14 @@ def apply_teacher_event_ops(
                 scope_id=int(scope_ids[row].item()),
                 privacy_id=int(privacy_ids[row].item()),
                 authority_id=int(authority_ids[row].item()),
+                payload_kind_id=int(payload_kind_ids[row].item()),
+                payload_default_action_id=int(payload_default_action_ids[row].item()),
+                payload_winning_authority_level_id=int(
+                    payload_winning_authority_level_ids[row].item()
+                ),
+                payload_losing_authority_level_id=int(
+                    payload_losing_authority_level_ids[row].item()
+                ),
             )
 
 
@@ -211,6 +233,14 @@ def sequential_controller_loss(
             scope_ids=batch["event_scope_ids"][:, event_idx],
             privacy_ids=batch["event_privacy_ids"][:, event_idx],
             authority_ids=batch["event_authority_ids"][:, event_idx],
+            payload_kind_ids=batch["event_payload_kind_ids"][:, event_idx],
+            payload_default_action_ids=batch["event_default_action_ids"][:, event_idx],
+            payload_winning_authority_level_ids=batch[
+                "event_winning_authority_level_ids"
+            ][:, event_idx],
+            payload_losing_authority_level_ids=batch[
+                "event_losing_authority_level_ids"
+            ][:, event_idx],
             write_mask=write_mask,
         )
     if not losses:
@@ -316,6 +346,10 @@ def main() -> None:
             scope_ids=batch["scope_ids"],
             privacy_ids=batch["privacy_ids"],
             authority_ids=batch["authority_ids"],
+            payload_kind_ids=batch["payload_kind_ids"],
+            payload_default_action_ids=batch["default_action_ids"],
+            payload_winning_authority_level_ids=batch["winning_authority_level_ids"],
+            payload_losing_authority_level_ids=batch["losing_authority_level_ids"],
             num_memory_slots=num_memory_slots,
             d_model=d_model,
             device=device,
