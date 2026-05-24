@@ -228,6 +228,12 @@ def main() -> None:
     parser.add_argument("--retrieval-contrastive-weight", type=float, default=0.25)
     parser.add_argument("--structured-loss-weight", type=float, default=0.2)
     parser.add_argument(
+        "--device",
+        choices=["auto", "cpu", "cuda"],
+        default="auto",
+        help="Training device. Use cuda in cloud notebooks to fail fast if GPU Torch is unavailable.",
+    )
+    parser.add_argument(
         "--sequential-controller-loss",
         dest="sequential_controller_loss",
         action="store_true",
@@ -241,7 +247,26 @@ def main() -> None:
     parser.set_defaults(sequential_controller_loss=True)
     args = parser.parse_args()
     traces = read_jsonl(args.traces)
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    if args.device == "auto":
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    elif args.device == "cuda":
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "CUDA was requested with --device cuda, but torch.cuda.is_available() is false. "
+                "Check that the notebook runtime has a GPU and that uv installed a CUDA-enabled "
+                "Torch wheel compatible with the runtime driver."
+            )
+        device = "cuda"
+    else:
+        device = "cpu"
+    if device == "cuda":
+        print(
+            "training device=cuda "
+            f"torch_cuda={torch.version.cuda} "
+            f"gpu={torch.cuda.get_device_name(0)}"
+        )
+    else:
+        print("training device=cpu")
     dataset = TraceDataset(traces)
     loader = DataLoader(
         dataset,
