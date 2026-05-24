@@ -306,17 +306,18 @@ Train the compact controller:
 uv run python -m hotbob.training.train --traces data/controller_authority_train.jsonl --steps 5000 --batch-size 32 --structured-loss-weight 0.3 --retrieval-contrastive-weight 0.25
 ```
 
-On a T4 Colab runtime, use the controller notebook defaults (`BATCH_SIZE=256`,
-`NUM_WORKERS=2`, `USE_AMP=True`) or this equivalent training command:
+On a T4 Colab runtime, the controller notebook defaults keep fixed-step runs
+comparable (`BATCH_SIZE=32`, `NUM_WORKERS=0`, `USE_AMP=False`). Larger batches
+may improve samples/sec but also do more samples per fixed `--steps` run.
 
 ```powershell
-python -m hotbob.training.train --traces data/controller_authority_train.jsonl --steps 5000 --batch-size 256 --num-workers 2 --structured-loss-weight 0.3 --retrieval-contrastive-weight 0.25 --device cuda --amp
+python -m hotbob.training.train --traces data/controller_authority_train.jsonl --steps 5000 --batch-size 32 --num-workers 0 --structured-loss-weight 0.3 --retrieval-contrastive-weight 0.25 --device cuda
 ```
 
 Quick speed benchmark command after generating the same train file:
 
 ```powershell
-time python -m hotbob.training.train --traces data/controller_authority_train.jsonl --steps 200 --batch-size 256 --num-workers 2 --structured-loss-weight 0.3 --retrieval-contrastive-weight 0.25 --device cuda --amp
+time python -m hotbob.training.train --traces data/controller_authority_train.jsonl --steps 200 --batch-size 32 --num-workers 0 --structured-loss-weight 0.3 --retrieval-contrastive-weight 0.25 --device cuda
 ```
 
 Evaluate and emit the controller-only authority report:

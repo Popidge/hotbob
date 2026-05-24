@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import time
 from pathlib import Path
 
 import torch
@@ -336,6 +337,7 @@ def main() -> None:
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
     losses: list[float] = []
     data_iter = iter(loader)
+    train_started_at = time.perf_counter()
 
     for step in track(range(args.steps), description="training"):
         try:
@@ -465,7 +467,13 @@ def main() -> None:
         scaler.update()
         losses.append(float(loss.detach().cpu().item()))
         if step == 0 or (step + 1) % 10 == 0 or step + 1 == args.steps:
-            print(f"step={step + 1} loss={losses[-1]:.4f}")
+            elapsed = max(time.perf_counter() - train_started_at, 1e-9)
+            steps_per_sec = (step + 1) / elapsed
+            samples_per_sec = ((step + 1) * args.batch_size) / elapsed
+            print(
+                f"step={step + 1} loss={losses[-1]:.4f} "
+                f"steps_per_sec={steps_per_sec:.2f} samples_per_sec={samples_per_sec:.1f}"
+            )
 
     Path("runs").mkdir(exist_ok=True)
     checkpoint = {
