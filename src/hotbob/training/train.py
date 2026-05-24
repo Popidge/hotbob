@@ -254,9 +254,11 @@ def main() -> None:
     parser.add_argument("--steps", type=int, default=50)
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--retrieval-contrastive-weight", type=float, default=0.25)
     parser.add_argument("--structured-loss-weight", type=float, default=0.2)
+    parser.add_argument("--amp", action="store_true")
     parser.add_argument(
         "--device",
         choices=["auto", "cpu", "cuda"],
@@ -303,6 +305,9 @@ def main() -> None:
         batch_size=args.batch_size,
         shuffle=True,
         collate_fn=collate_traces,
+        num_workers=args.num_workers,
+        pin_memory=device == "cuda",
+        persistent_workers=args.num_workers > 0,
     )
     d_model = 64 if args.smoke else 128
     num_memory_slots = 32
@@ -327,6 +332,8 @@ def main() -> None:
     ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
     ce = nn.CrossEntropyLoss()
+    use_amp = args.amp and device == "cuda"
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
     losses: list[float] = []
     data_iter = iter(loader)
 
@@ -336,124 +343,126 @@ def main() -> None:
         except StopIteration:
             data_iter = iter(loader)
             batch = next(data_iter)
-        batch = {key: value.to(device) for key, value in batch.items()}
-        memory = build_teacher_forced_memory(
-            model_embed=model.transformer.embed,
-            memory_value_tokens=batch["memory_value_tokens"],
-            memory_value_mask=batch["memory_value_mask"],
-            slot_ids=batch["slot_ids"],
-            type_ids=batch["type_ids"],
-            scope_ids=batch["scope_ids"],
-            privacy_ids=batch["privacy_ids"],
-            authority_ids=batch["authority_ids"],
-            payload_kind_ids=batch["payload_kind_ids"],
-            payload_default_action_ids=batch["default_action_ids"],
-            payload_winning_authority_level_ids=batch["winning_authority_level_ids"],
-            payload_losing_authority_level_ids=batch["losing_authority_level_ids"],
-            num_memory_slots=num_memory_slots,
-            d_model=d_model,
-            device=device,
-        )
-        flat_event_tokens = batch["event_tokens"].flatten(0, 1)
-        flat_event_lengths = batch["event_lengths"].flatten(0, 1)
-        flat_event_mask = batch["event_mask"].flatten(0, 1)
-        flat_event_scope_ids = batch["event_scope_ids"].flatten(0, 1)
-        event_memory = MemoryBank(num_slots=num_memory_slots, d_model=d_model, device=device)
-        event_memory.reset(flat_event_tokens.shape[0])
-        event_outputs = model(
-            flat_event_tokens,
-            event_memory,
-            flat_event_scope_ids,
-            flat_event_lengths.clamp_min(1),
-        )
-        outputs = model(batch["tokens"], memory, batch["current_scope_ids"], batch["lengths"])
-        loss = ce(outputs["action_logits"], batch["action_ids"])
-        loss = loss + ce(
-            event_outputs["op_logits"][flat_event_mask],
-            batch["event_op_ids"].flatten(0, 1)[flat_event_mask],
-        )
-        flat_write_mask = batch["event_has_write"].flatten(0, 1) & flat_event_mask
-        if bool(flat_write_mask.any().item()):
-            loss = loss + ce(
-                event_outputs["slot_logits"][flat_write_mask],
-                batch["event_slot_ids"].flatten(0, 1)[flat_write_mask],
-            )
-            loss = loss + ce(
-                event_outputs["type_logits"][flat_write_mask],
-                batch["event_type_ids"].flatten(0, 1)[flat_write_mask],
-            )
-            loss = loss + ce(
-                event_outputs["scope_logits"][flat_write_mask],
-                batch["event_scope_ids"].flatten(0, 1)[flat_write_mask],
-            )
-            loss = loss + ce(
-                event_outputs["privacy_logits"][flat_write_mask],
-                batch["event_privacy_ids"].flatten(0, 1)[flat_write_mask],
-            )
-            loss = loss + ce(
-                event_outputs["authority_logits"][flat_write_mask],
-                batch["event_authority_ids"].flatten(0, 1)[flat_write_mask],
-            )
-            loss = loss + ce(
-                event_outputs["value_class_logits"][flat_write_mask],
-                batch["event_value_class_ids"].flatten(0, 1)[flat_write_mask],
-            )
-            structured_loss = structured_event_loss(
-                outputs=event_outputs,
-                batch=batch,
-                event_idx=None,
-                mask=flat_write_mask,
-                ce=ce,
-            )
-            if structured_loss is not None:
-                loss = loss + args.structured_loss_weight * structured_loss
-        if bool(flat_write_mask.any().item()):
-            flat_event_value_tokens = batch["event_value_tokens"].flatten(0, 1)
-            flat_event_value_mask = batch["event_value_mask"].flatten(0, 1)
-            target_value = mean_value_embedding(
-                model.transformer.embed,
-                flat_event_value_tokens[flat_write_mask],
-                flat_event_value_mask[flat_write_mask],
-            ).detach()
-            predicted_value = event_outputs["value_vector"][flat_write_mask]
-            loss = loss + F.mse_loss(predicted_value, target_value)
-            if predicted_value.shape[0] > 1:
-                pred_norm = F.normalize(predicted_value, dim=-1)
-                target_norm = F.normalize(target_value, dim=-1)
-                logits = pred_norm @ target_norm.T / 0.1
-                labels = torch.arange(predicted_value.shape[0], device=device)
-                loss = loss + F.cross_entropy(logits, labels)
-        if args.sequential_controller_loss:
-            loss = loss + sequential_controller_loss(
-                model=model,
-                batch=batch,
+        batch = {key: value.to(device, non_blocking=True) for key, value in batch.items()}
+        with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=use_amp):
+            memory = build_teacher_forced_memory(
+                model_embed=model.transformer.embed,
+                memory_value_tokens=batch["memory_value_tokens"],
+                memory_value_mask=batch["memory_value_mask"],
+                slot_ids=batch["slot_ids"],
+                type_ids=batch["type_ids"],
+                scope_ids=batch["scope_ids"],
+                privacy_ids=batch["privacy_ids"],
+                authority_ids=batch["authority_ids"],
+                payload_kind_ids=batch["payload_kind_ids"],
+                payload_default_action_ids=batch["default_action_ids"],
+                payload_winning_authority_level_ids=batch["winning_authority_level_ids"],
+                payload_losing_authority_level_ids=batch["losing_authority_level_ids"],
                 num_memory_slots=num_memory_slots,
                 d_model=d_model,
                 device=device,
-                ce=ce,
-                structured_loss_weight=args.structured_loss_weight,
             )
-        read_attn = outputs["read_attention"][
-            torch.arange(batch["tokens"].shape[0], device=device),
-            outputs["boundary_indices"],
-            batch["slot_ids"],
-        ]
-        loss = loss - 0.1 * torch.log(read_attn.clamp_min(1e-6)).mean()
-        if batch["tokens"].shape[0] > 1 and args.retrieval_contrastive_weight > 0:
-            target_value = mean_value_embedding(
-                model.transformer.embed,
-                batch["memory_value_tokens"],
-                batch["memory_value_mask"],
-            ).detach()
-            loss = loss + args.retrieval_contrastive_weight * contrastive_retrieval_loss(
-                outputs["memory_context"],
-                target_value,
-                target_value,
+            flat_event_tokens = batch["event_tokens"].flatten(0, 1)
+            flat_event_lengths = batch["event_lengths"].flatten(0, 1)
+            flat_event_mask = batch["event_mask"].flatten(0, 1)
+            flat_event_scope_ids = batch["event_scope_ids"].flatten(0, 1)
+            event_memory = MemoryBank(num_slots=num_memory_slots, d_model=d_model, device=device)
+            event_memory.reset(flat_event_tokens.shape[0])
+            event_outputs = model(
+                flat_event_tokens,
+                event_memory,
+                flat_event_scope_ids,
+                flat_event_lengths.clamp_min(1),
             )
+            outputs = model(batch["tokens"], memory, batch["current_scope_ids"], batch["lengths"])
+            loss = ce(outputs["action_logits"], batch["action_ids"])
+            loss = loss + ce(
+                event_outputs["op_logits"][flat_event_mask],
+                batch["event_op_ids"].flatten(0, 1)[flat_event_mask],
+            )
+            flat_write_mask = batch["event_has_write"].flatten(0, 1) & flat_event_mask
+            if bool(flat_write_mask.any().item()):
+                loss = loss + ce(
+                    event_outputs["slot_logits"][flat_write_mask],
+                    batch["event_slot_ids"].flatten(0, 1)[flat_write_mask],
+                )
+                loss = loss + ce(
+                    event_outputs["type_logits"][flat_write_mask],
+                    batch["event_type_ids"].flatten(0, 1)[flat_write_mask],
+                )
+                loss = loss + ce(
+                    event_outputs["scope_logits"][flat_write_mask],
+                    batch["event_scope_ids"].flatten(0, 1)[flat_write_mask],
+                )
+                loss = loss + ce(
+                    event_outputs["privacy_logits"][flat_write_mask],
+                    batch["event_privacy_ids"].flatten(0, 1)[flat_write_mask],
+                )
+                loss = loss + ce(
+                    event_outputs["authority_logits"][flat_write_mask],
+                    batch["event_authority_ids"].flatten(0, 1)[flat_write_mask],
+                )
+                loss = loss + ce(
+                    event_outputs["value_class_logits"][flat_write_mask],
+                    batch["event_value_class_ids"].flatten(0, 1)[flat_write_mask],
+                )
+                structured_loss = structured_event_loss(
+                    outputs=event_outputs,
+                    batch=batch,
+                    event_idx=None,
+                    mask=flat_write_mask,
+                    ce=ce,
+                )
+                if structured_loss is not None:
+                    loss = loss + args.structured_loss_weight * structured_loss
+            if bool(flat_write_mask.any().item()):
+                flat_event_value_tokens = batch["event_value_tokens"].flatten(0, 1)
+                flat_event_value_mask = batch["event_value_mask"].flatten(0, 1)
+                target_value = mean_value_embedding(
+                    model.transformer.embed,
+                    flat_event_value_tokens[flat_write_mask],
+                    flat_event_value_mask[flat_write_mask],
+                ).detach()
+                predicted_value = event_outputs["value_vector"][flat_write_mask]
+                loss = loss + F.mse_loss(predicted_value, target_value)
+                if predicted_value.shape[0] > 1:
+                    pred_norm = F.normalize(predicted_value, dim=-1)
+                    target_norm = F.normalize(target_value, dim=-1)
+                    logits = pred_norm @ target_norm.T / 0.1
+                    labels = torch.arange(predicted_value.shape[0], device=device)
+                    loss = loss + F.cross_entropy(logits, labels)
+            if args.sequential_controller_loss:
+                loss = loss + sequential_controller_loss(
+                    model=model,
+                    batch=batch,
+                    num_memory_slots=num_memory_slots,
+                    d_model=d_model,
+                    device=device,
+                    ce=ce,
+                    structured_loss_weight=args.structured_loss_weight,
+                )
+            read_attn = outputs["read_attention"][
+                torch.arange(batch["tokens"].shape[0], device=device),
+                outputs["boundary_indices"],
+                batch["slot_ids"],
+            ]
+            loss = loss - 0.1 * torch.log(read_attn.clamp_min(1e-6)).mean()
+            if batch["tokens"].shape[0] > 1 and args.retrieval_contrastive_weight > 0:
+                target_value = mean_value_embedding(
+                    model.transformer.embed,
+                    batch["memory_value_tokens"],
+                    batch["memory_value_mask"],
+                ).detach()
+                loss = loss + args.retrieval_contrastive_weight * contrastive_retrieval_loss(
+                    outputs["memory_context"],
+                    target_value,
+                    target_value,
+                )
 
         optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
         losses.append(float(loss.detach().cpu().item()))
         if step == 0 or (step + 1) % 10 == 0 or step + 1 == args.steps:
             print(f"step={step + 1} loss={losses[-1]:.4f}")

@@ -355,6 +355,7 @@ class TraceDataset(Dataset[EncodedTrace]):
         value_vocab: dict[str, int] | None = None,
         tool_name_vocab: dict[str, int] | None = None,
         max_seq_len: int = 256,
+        cache_encoded: bool = True,
     ) -> None:
         self.traces = traces
         self.vocab = vocab or build_vocab(traces)
@@ -362,11 +363,24 @@ class TraceDataset(Dataset[EncodedTrace]):
         self.value_vocab = value_vocab or build_value_vocab(traces)
         self.tool_name_vocab = tool_name_vocab or build_tool_name_vocab(traces)
         self.max_seq_len = max_seq_len
+        self._encoded_cache: list[EncodedTrace | None] | None = (
+            [None] * len(traces) if cache_encoded else None
+        )
 
     def __len__(self) -> int:
         return len(self.traces)
 
     def __getitem__(self, idx: int) -> EncodedTrace:
+        if self._encoded_cache is not None:
+            cached = self._encoded_cache[idx]
+            if cached is not None:
+                return cached
+            encoded = self._encode_trace(idx)
+            self._encoded_cache[idx] = encoded
+            return encoded
+        return self._encode_trace(idx)
+
+    def _encode_trace(self, idx: int) -> EncodedTrace:
         trace = self.traces[idx]
         first_op = self._select_supervised_op(trace)
         write_event = next(

@@ -306,6 +306,19 @@ Train the compact controller:
 uv run python -m hotbob.training.train --traces data/controller_authority_train.jsonl --steps 5000 --batch-size 32 --structured-loss-weight 0.3 --retrieval-contrastive-weight 0.25
 ```
 
+On a T4 Colab runtime, use the controller notebook defaults (`BATCH_SIZE=256`,
+`NUM_WORKERS=2`, `USE_AMP=True`) or this equivalent training command:
+
+```powershell
+python -m hotbob.training.train --traces data/controller_authority_train.jsonl --steps 5000 --batch-size 256 --num-workers 2 --structured-loss-weight 0.3 --retrieval-contrastive-weight 0.25 --device cuda --amp
+```
+
+Quick speed benchmark command after generating the same train file:
+
+```powershell
+time python -m hotbob.training.train --traces data/controller_authority_train.jsonl --steps 200 --batch-size 256 --num-workers 2 --structured-loss-weight 0.3 --retrieval-contrastive-weight 0.25 --device cuda --amp
+```
+
 Evaluate and emit the controller-only authority report:
 
 ```powershell
