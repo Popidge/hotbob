@@ -288,51 +288,42 @@ Success criteria:
 
 ## Authority Memory Reader Follow-Up
 
-The `experiment/authority-memory-reader` branch targets the authority bottleneck
-left by the split-data prefix+LoRA run. That run showed real memory use overall,
-with predicted aggregate accuracy around `0.828`, but authority stayed poor:
-predicted and context-only were both around `0.120`, and teacher-forced
-authority was only around `0.264`. Because teacher-forced memory also failed,
-the issue is readout/encoding of authority semantics, not only predicted writes.
+The `experiment/authority-memory-reader` branch is now a controller-first
+authority probe. The frozen-Qwen and LoRA path can still be explored separately,
+but this branch's core question is simpler: can the compact HotBob controller
+write the right typed memories, retrieve the active scoped authority memory, and
+produce the right action under predicted memory?
 
-This branch keeps defaults unchanged and adds opt-in experiment controls:
-`--memory-prefix-metadata-mode metadata` enriches prefix-read memory vectors with
-learned type, scope, privacy, authority, payload kind, payload action, and
-winning/losing authority-level embeddings before `MemoryRead`; LLM memory values
-encode `memory_text_from_op(op)` so typed authority payload fields reach
-teacher-forced memory; structured targets now include both winning and losing
-authority levels; and authority traces include bounded channel and
-prompt-injection pressure. Data and loss weighting are opt-in through repeated
-`--family-weight FAMILY=FLOAT` and `--family-loss-weight FAMILY=FLOAT`.
-
-One-line PowerShell commands for the main 1k-step run:
+Generate authority-heavy controller traces:
 
 ```powershell
-uv run python -m hotbob.llm.generate_data --train-out data/authority_controller_train_a.jsonl --eval-out data/authority_unused_a_eval.jsonl --train-n 10000 --eval-n 1000 --seed 31 --family-weight authority_conflict=4 --family-weight tool_verified_override=2
-uv run python -m hotbob.llm.train --traces data/authority_controller_train_a.jsonl --steps 1000 --batch-size 1 --integration-mode prefix --freeze-base --structured-loss-weight 0.3 --memory-prefix-metadata-mode metadata --family-loss-weight authority_conflict=2 --out runs/qwen_memory/authority_prefix_controller_a_1k.pt
-uv run python -m hotbob.llm.train --traces data/authority_lora_train_b.jsonl --steps 1000 --batch-size 1 --integration-mode prefix --freeze-base --memory-heads-checkpoint runs/qwen_memory/authority_prefix_controller_a_1k.pt --freeze-memory-heads --write-loss-weight 0 --memory-prefix-metadata-mode metadata --lora-backend peft --lora-r 16 --lora-alpha 32 --lora-dropout 0.05 --lora-target-modules q_proj k_proj v_proj o_proj --lora-lr 2e-4 --family-loss-weight authority_conflict=2 --out runs/qwen_memory/authority_prefix_lora_b_1k.pt
-uv run python -m hotbob.llm.compare --traces data/authority_eval_c.jsonl --checkpoints authority_controller=runs/qwen_memory/authority_prefix_controller_a_1k.pt authority_lora=runs/qwen_memory/authority_prefix_lora_b_1k.pt --modes predicted context_only teacher_forced --decode-strategy score_answers --batch-size 1 --out runs/qwen_memory/authority_prefix_lora_1k_comparison.json
-uv run python -m hotbob.llm.authority_report --checkpoint runs/qwen_memory/authority_prefix_lora_b_1k.pt --traces data/authority_eval_c.jsonl --mode predicted --decode-strategy score_answers --out runs/qwen_memory/authority_prefix_lora_1k_authority_predicted.json
+uv run python -m hotbob.data.generate --train-out data/controller_authority_train.jsonl --eval-out data/controller_authority_eval.jsonl --train-n 50000 --eval-n 5000 --seed 51 --family-weight authority_conflict=10 --family-weight tool_verified_override=3 --family-weight scope_isolation=1 --family-weight privacy_disclosure_conflict=1
 ```
 
-Authority-heavy readout probe (isolate prefix readout before more LoRA):
+Train the compact controller:
 
 ```powershell
-uv run python -m hotbob.llm.generate_data --train-out data/authority_readout_probe_train.jsonl --eval-out data/authority_readout_probe_eval.jsonl --train-n 8000 --eval-n 1000 --seed 41 --family-weight authority_conflict=20 --family-weight tool_verified_override=1
-uv run python -m hotbob.llm.train --traces data/authority_readout_probe_train.jsonl --steps 1000 --batch-size 1 --integration-mode prefix --freeze-base --write-loss-weight 0 --structured-loss-weight 0.3 --memory-prefix-metadata-mode metadata --family-loss-weight authority_conflict=4 --out runs/qwen_memory/authority_readout_probe_1k.pt
-uv run python -m hotbob.llm.authority_report --checkpoint runs/qwen_memory/authority_readout_probe_1k.pt --traces data/authority_readout_probe_eval.jsonl --mode teacher_forced --decode-strategy score_answers --compact --out runs/qwen_memory/authority_readout_probe_teacher_forced_summary.json
+uv run python -m hotbob.training.train --traces data/controller_authority_train.jsonl --steps 5000 --batch-size 32 --structured-loss-weight 0.3 --retrieval-contrastive-weight 0.25
 ```
 
-`authority_report` now includes write-head accuracy (`write_diagnostics`), prefix
-read attention summaries (`read_diagnostics`), prediction distribution percentages,
-and prompt-injection slice accuracy. Use `--compact` to omit per-trace failure
-rows from saved JSON.
+Evaluate and emit the controller-only authority report:
 
-Success criteria for this branch are teacher-forced authority `>= 0.65`,
-predicted authority `>= 0.40`, context-only authority `<= 0.25`, predicted
-authority at least `0.20` above context-only, no secret leaks, and normal mixed
-predicted aggregate regression no worse than `0.03` from the current `0.828`
-split-LoRA baseline.
+```powershell
+uv run python -m hotbob.training.evaluate --checkpoint runs/latest.pt --traces data/controller_authority_eval.jsonl --batch-size 64 --debug-families authority_conflict tool_verified_override --debug-dumps-out runs/controller_authority_debug.jsonl
+uv run python -m hotbob.training.authority_report --checkpoint runs/latest.pt --traces data/controller_authority_eval.jsonl --out runs/controller_authority_report.json
+```
+
+`hotbob.training.authority_report` reports sequential `context_only`,
+`teacher_forced`, `predicted`, and predicted oracle slot/scope/value ablations.
+For each mode it highlights authority accuracy, authority probe accuracy
+(`authority_conflict` plus `tool_verified_override`), target-slot read mass,
+boundary F1, and write-head accuracies.
+
+Success criteria for this branch are predicted authority materially above
+context-only, predicted authority close to teacher-forced, oracle ablations that
+identify any remaining write/read bottleneck, no secret leaks, and no major
+regression on the mixed controller evaluation. The cloud workflow for this probe
+lives in `controller_authority_colab.ipynb`.
 
 ## Delta-HotBob
 

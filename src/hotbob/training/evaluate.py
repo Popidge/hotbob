@@ -1111,6 +1111,8 @@ def main() -> None:
         ("hidden_colour", "hidden_colour_guess"),
         ("expiry", "expiry_active"),
         ("expiry", "expiry_expired"),
+        ("authority_conflict", "authority_conflict"),
+        ("tool_verified_override", "tool_verified_override"),
     ]
     for family, scenario in diagnostic_rows:
         confusions = (
