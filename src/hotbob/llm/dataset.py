@@ -7,7 +7,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from hotbob.data.traces import generate_traces
+from hotbob.data.traces import generate_traces, generate_weighted_traces
 from hotbob.llm.prompts import final_prompt_from_trace, target_text_from_trace
 from hotbob.training.dataset import normalize_scope
 from hotbob.types import MemoryOp, TaskTrace, TraceEvent
@@ -96,6 +96,17 @@ def read_llm_jsonl(path: str | Path) -> list[LLMTrace]:
 
 def generate_llm_traces(n: int, seed: int) -> list[LLMTrace]:
     return [task_trace_to_llm_trace(trace) for trace in generate_traces(n, seed)]
+
+
+def generate_weighted_llm_traces(
+    n: int,
+    seed: int,
+    family_weights: dict[str, float] | None = None,
+) -> list[LLMTrace]:
+    return [
+        task_trace_to_llm_trace(trace)
+        for trace in generate_weighted_traces(n, seed, family_weights)
+    ]
 
 
 def build_llm_scope_vocab(traces: list[LLMTrace]) -> dict[str, int]:

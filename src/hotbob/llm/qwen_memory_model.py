@@ -23,6 +23,7 @@ from hotbob.training.dataset import (
     PRIVACY_TO_ID,
     TYPE_TO_ID,
     build_scope_vocab,
+    memory_text_from_op,
     structured_targets_from_payload,
 )
 from hotbob.types import MemoryOpName, MemoryPrivacy, TaskTrace
@@ -36,10 +37,12 @@ class QwenMemoryConfig:
     freeze_base: bool = True
     integration_mode: str = "prefix"
     memory_state_mode: str = MemoryStateMode.SHARED.value
+    memory_prefix_metadata_mode: Literal["none", "metadata"] = "none"
     correction_rank: int = 16
     attention_patch_layers: str = "all"
     num_value_classes: int = 64
     structured_loss_weight: float = 0.2
+    authority_payload_loss_weight: float = 1.0
     tool_name_vocab: dict[str, int] = field(default_factory=dict)
     num_route_steps: int = 8
     device: str = "auto"
@@ -83,6 +86,7 @@ class QwenMemoryModel(nn.Module):
             self.config_obj.memory_prefix_len,
             self.config_obj.correction_rank,
             self.config_obj.memory_state_mode,
+            self.config_obj.memory_prefix_metadata_mode,
         )
         self.memory_heads.to(self._device())
         self._q_patch_modules, self._o_patch_modules = self._discover_attention_patch_targets()
@@ -448,6 +452,20 @@ class QwenMemoryModel(nn.Module):
         scope = int(outputs["scope_logits"].argmax(dim=-1)[batch_idx].item())
         privacy = int(outputs["privacy_logits"].argmax(dim=-1)[batch_idx].item())
         authority = int(outputs["authority_logits"].argmax(dim=-1)[batch_idx].item())
+        payload_kind = int(outputs["payload_kind_logits"].argmax(dim=-1)[batch_idx].item())
+        payload_default_action = int(
+            outputs["payload_default_action_logits"].argmax(dim=-1)[batch_idx].item()
+        )
+        payload_winning_authority_level = int(
+            outputs["payload_winning_authority_level_logits"].argmax(dim=-1)[
+                batch_idx
+            ].item()
+        )
+        payload_losing_authority_level = int(
+            outputs["payload_losing_authority_level_logits"].argmax(dim=-1)[
+                batch_idx
+            ].item()
+        )
         self.memory.apply_write(
             batch_idx,
             slot,
@@ -456,12 +474,20 @@ class QwenMemoryModel(nn.Module):
             scope_id=scope,
             privacy_id=privacy,
             authority_id=authority,
+            payload_kind_id=payload_kind,
+            payload_default_action_id=payload_default_action,
+            payload_winning_authority_level_id=payload_winning_authority_level,
+            payload_losing_authority_level_id=payload_losing_authority_level,
         )
 
     def apply_teacher_trace_memory(self, trace: LLMTrace) -> None:
         self.reset_memory(1)
         for idx, op in enumerate(trace.expected_memory_ops):
-            value_vector = self.encode_event("MEMORY_VALUE", op.value, op.scope)[0].float().detach()
+            value_vector = self.encode_event(
+                "MEMORY_VALUE",
+                memory_text_from_op(op),
+                op.scope,
+            )[0].float().detach()
             apply_teacher_memory_op(
                 self.memory,
                 op,
@@ -726,12 +752,13 @@ class QwenMemoryModel(nn.Module):
                     nn.functional.cross_entropy(outputs["scope_logits"], target_scope),
                     nn.functional.cross_entropy(outputs["privacy_logits"], target_privacy),
                     nn.functional.cross_entropy(outputs["authority_logits"], target_authority),
-                    nn.functional.cross_entropy(outputs["slot_logits"], target_slot),
+                    self.config_obj.authority_payload_loss_weight
+                    * nn.functional.cross_entropy(outputs["slot_logits"], target_slot),
                 ]
             )
             predicted_value = self.memory_heads.value_projector(outputs["value_vector"])[0]
             target_value = self.encode_event(
-                "MEMORY_VALUE", target_op.value, target_op.scope
+                "MEMORY_VALUE", memory_text_from_op(target_op), target_op.scope
             )[0].float()
             losses.append(nn.functional.mse_loss(predicted_value, target_value))
             structured = structured_targets_from_payload(
@@ -757,9 +784,24 @@ class QwenMemoryModel(nn.Module):
                     "authority_level_id",
                     "has_authority_level",
                 ),
+                (
+                    "payload_winning_authority_level_logits",
+                    "winning_authority_level_id",
+                    "has_winning_authority_level",
+                ),
+                (
+                    "payload_losing_authority_level_logits",
+                    "losing_authority_level_id",
+                    "has_losing_authority_level",
+                ),
                 ("payload_tool_name_logits", "tool_name_id", "has_tool_name"),
                 ("payload_route_step_logits", "route_step_id", "has_route_step"),
             ]
+            weighted_payload_heads = {
+                "payload_default_action_logits",
+                "payload_winning_authority_level_logits",
+                "payload_losing_authority_level_logits",
+            }
             for logits_key, target_key, mask_key in structured_specs:
                 target_id = int(structured[target_key])
                 has_target = (
@@ -774,7 +816,10 @@ class QwenMemoryModel(nn.Module):
                 target_tensor = torch.tensor(
                     [target_id], dtype=torch.long, device=self._device()
                 )
-                structured_losses.append(nn.functional.cross_entropy(logits, target_tensor))
+                head_loss = nn.functional.cross_entropy(logits, target_tensor)
+                if logits_key in weighted_payload_heads:
+                    head_loss = self.config_obj.authority_payload_loss_weight * head_loss
+                structured_losses.append(head_loss)
             if structured_losses:
                 losses.append(
                     self.config_obj.structured_loss_weight

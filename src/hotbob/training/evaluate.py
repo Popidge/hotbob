@@ -266,7 +266,7 @@ def evaluate_neural(
         num_route_steps=config.get("num_route_steps", 8),
         max_seq_len=config.get("max_seq_len", 256),
     ).to(device)
-    model.load_state_dict(checkpoint["model_state"])
+    model.load_state_dict(checkpoint["model_state"], strict=False)
     model.eval()
     loader = DataLoader(dataset, batch_size=batch_size, collate_fn=collate_traces)
     totals: Counter[str] = Counter()
@@ -446,7 +446,7 @@ def load_model_and_dataset(
         num_route_steps=config.get("num_route_steps", 8),
         max_seq_len=config.get("max_seq_len", 256),
     ).to(device)
-    model.load_state_dict(checkpoint["model_state"])
+    model.load_state_dict(checkpoint["model_state"], strict=False)
     model.eval()
     return model, dataset, config
 

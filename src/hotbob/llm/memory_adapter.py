@@ -28,15 +28,91 @@ class MemoryStateMode(StrEnum):
 
 
 class MemoryPrefixAdapter(nn.Module):
-    def __init__(self, hidden_size: int, memory_prefix_len: int = 4) -> None:
+    def __init__(
+        self,
+        hidden_size: int,
+        memory_prefix_len: int = 4,
+        *,
+        num_types: int = 1,
+        num_scopes: int = 1,
+        num_privacy: int = 1,
+        num_authority: int = 1,
+        num_payload_kinds: int = 1,
+        num_policy_actions: int = 1,
+        num_authority_levels: int = 1,
+        metadata_mode: str = "none",
+    ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
         self.memory_prefix_len = memory_prefix_len
+        self.metadata_mode = metadata_mode
+        if metadata_mode not in {"none", "metadata"}:
+            raise ValueError(f"Unknown prefix metadata mode: {metadata_mode}")
+        if metadata_mode == "metadata":
+            self.type_embedding = nn.Embedding(num_types, hidden_size)
+            self.scope_embedding = nn.Embedding(num_scopes, hidden_size)
+            self.privacy_embedding = nn.Embedding(num_privacy, hidden_size)
+            self.authority_embedding = nn.Embedding(num_authority, hidden_size)
+            self.payload_kind_embedding = nn.Embedding(num_payload_kinds, hidden_size)
+            self.payload_default_action_embedding = nn.Embedding(
+                num_policy_actions, hidden_size
+            )
+            self.payload_winning_authority_level_embedding = nn.Embedding(
+                num_authority_levels, hidden_size
+            )
+            self.payload_losing_authority_level_embedding = nn.Embedding(
+                num_authority_levels, hidden_size
+            )
         self.read = MemoryRead(hidden_size)
         self.to_prefix = nn.Sequential(
             nn.LayerNorm(hidden_size),
             nn.Linear(hidden_size, hidden_size * memory_prefix_len),
         )
+
+    def _enriched_memory(self, memory: MemoryBank) -> MemoryBank:
+        if self.metadata_mode == "none":
+            return memory
+        enriched = memory.clone_empty_like()
+        type_ids = memory.type_ids.clamp(0, self.type_embedding.num_embeddings - 1)
+        scope_ids = memory.scope_ids.clamp(0, self.scope_embedding.num_embeddings - 1)
+        privacy_ids = memory.privacy_ids.clamp(0, self.privacy_embedding.num_embeddings - 1)
+        authority_ids = memory.authority_ids.clamp(0, self.authority_embedding.num_embeddings - 1)
+        payload_kind_ids = memory.payload_kind_ids.clamp(
+            0, self.payload_kind_embedding.num_embeddings - 1
+        )
+        payload_default_action_ids = memory.payload_default_action_ids.clamp(
+            0, self.payload_default_action_embedding.num_embeddings - 1
+        )
+        payload_winning_authority_level_ids = memory.payload_winning_authority_level_ids.clamp(
+            0, self.payload_winning_authority_level_embedding.num_embeddings - 1
+        )
+        payload_losing_authority_level_ids = memory.payload_losing_authority_level_ids.clamp(
+            0, self.payload_losing_authority_level_embedding.num_embeddings - 1
+        )
+        enriched.vectors = (
+            memory.vectors
+            + self.type_embedding(type_ids)
+            + self.scope_embedding(scope_ids)
+            + self.privacy_embedding(privacy_ids)
+            + self.authority_embedding(authority_ids)
+            + self.payload_kind_embedding(payload_kind_ids)
+            + self.payload_default_action_embedding(payload_default_action_ids)
+            + self.payload_winning_authority_level_embedding(payload_winning_authority_level_ids)
+            + self.payload_losing_authority_level_embedding(payload_losing_authority_level_ids)
+        )
+        enriched.occupied = memory.occupied
+        enriched.strength = memory.strength
+        enriched.type_ids = memory.type_ids
+        enriched.scope_ids = memory.scope_ids
+        enriched.privacy_ids = memory.privacy_ids
+        enriched.authority_ids = memory.authority_ids
+        enriched.payload_kind_ids = memory.payload_kind_ids
+        enriched.payload_default_action_ids = memory.payload_default_action_ids
+        enriched.payload_winning_authority_level_ids = (
+            memory.payload_winning_authority_level_ids
+        )
+        enriched.payload_losing_authority_level_ids = memory.payload_losing_authority_level_ids
+        return enriched
 
     def forward(
         self,
@@ -44,7 +120,11 @@ class MemoryPrefixAdapter(nn.Module):
         memory: MemoryBank,
         current_scope_ids: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        read_hidden, attention = self.read(query_hidden.unsqueeze(1), memory, current_scope_ids)
+        read_hidden, attention = self.read(
+            query_hidden.unsqueeze(1),
+            self._enriched_memory(memory),
+            current_scope_ids,
+        )
         prefix = self.to_prefix(read_hidden[:, 0]).view(
             query_hidden.shape[0], self.memory_prefix_len, self.hidden_size
         )
@@ -193,6 +273,7 @@ class LQwenMemoryHeads(nn.Module):
         memory_prefix_len: int = 4,
         correction_rank: int = 16,
         memory_state_mode: MemoryStateMode | str = MemoryStateMode.SHARED,
+        memory_prefix_metadata_mode: str = "none",
     ) -> None:
         super().__init__()
         self.writer = MemoryWrite(
@@ -212,7 +293,18 @@ class LQwenMemoryHeads(nn.Module):
             num_route_steps,
         )
         self.value_projector = nn.Linear(hidden_size, hidden_size)
-        self.prefix = MemoryPrefixAdapter(hidden_size, memory_prefix_len)
+        self.prefix = MemoryPrefixAdapter(
+            hidden_size,
+            memory_prefix_len,
+            num_types=len(TYPE_TO_ID),
+            num_scopes=num_scopes,
+            num_privacy=len(PRIVACY_TO_ID),
+            num_authority=len(AUTHORITY_TO_ID),
+            num_payload_kinds=max(PAYLOAD_KIND_TO_ID.values(), default=0) + 1,
+            num_policy_actions=max(POLICY_ACTION_TO_ID.values(), default=0) + 1,
+            num_authority_levels=max(AUTHORITY_LEVEL_TO_ID.values(), default=0) + 1,
+            metadata_mode=memory_prefix_metadata_mode,
+        )
         self.correction = LowRankMemoryCorrectionAdapter(
             hidden_size,
             rank=correction_rank,
@@ -250,7 +342,17 @@ def apply_teacher_memory_op(
         return
     if op.op == MemoryOpName.UPDATE and bool(memory.occupied[0, slot_idx].item()):
         memory.apply_update(0, slot_idx, vector)
+        structured = structured_memory_metadata(op)
+        memory.payload_kind_ids[0, slot_idx] = structured["payload_kind_id"]
+        memory.payload_default_action_ids[0, slot_idx] = structured["default_action_id"]
+        memory.payload_winning_authority_level_ids[0, slot_idx] = structured[
+            "winning_authority_level_id"
+        ]
+        memory.payload_losing_authority_level_ids[0, slot_idx] = structured[
+            "losing_authority_level_id"
+        ]
         return
+    structured = structured_memory_metadata(op)
     memory.apply_write(
         0,
         slot_idx,
@@ -259,4 +361,20 @@ def apply_teacher_memory_op(
         scope_id=scope_id(op.scope, scope_vocab),
         privacy_id=PRIVACY_TO_ID[op.privacy],
         authority_id=AUTHORITY_TO_ID[op.authority],
+        payload_kind_id=structured["payload_kind_id"],
+        payload_default_action_id=structured["default_action_id"],
+        payload_winning_authority_level_id=structured["winning_authority_level_id"],
+        payload_losing_authority_level_id=structured["losing_authority_level_id"],
     )
+
+
+def structured_memory_metadata(op: MemoryOp) -> dict[str, int]:
+    from hotbob.training.dataset import structured_targets_from_payload
+
+    structured = structured_targets_from_payload(op.payload)
+    return {
+        "payload_kind_id": int(structured["payload_kind_id"]),
+        "default_action_id": int(structured["default_action_id"]),
+        "winning_authority_level_id": int(structured["winning_authority_level_id"]),
+        "losing_authority_level_id": int(structured["losing_authority_level_id"]),
+    }

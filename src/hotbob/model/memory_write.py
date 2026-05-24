@@ -38,6 +38,8 @@ class MemoryWrite(nn.Module):
         self.payload_exception_head = nn.Linear(d_model, num_policy_triggers)
         self.payload_expiry_policy_head = nn.Linear(d_model, num_expiry_policies)
         self.payload_authority_level_head = nn.Linear(d_model, num_authority_levels)
+        self.payload_winning_authority_level_head = nn.Linear(d_model, num_authority_levels)
+        self.payload_losing_authority_level_head = nn.Linear(d_model, num_authority_levels)
         self.payload_tool_name_head = nn.Linear(d_model, num_tool_names)
         self.payload_route_step_head = nn.Linear(d_model, num_route_steps)
         self.value_head = nn.Linear(d_model, d_model)
@@ -58,6 +60,12 @@ class MemoryWrite(nn.Module):
             "payload_exception_logits": self.payload_exception_head(boundary_hidden),
             "payload_expiry_policy_logits": self.payload_expiry_policy_head(boundary_hidden),
             "payload_authority_level_logits": self.payload_authority_level_head(boundary_hidden),
+            "payload_winning_authority_level_logits": (
+                self.payload_winning_authority_level_head(boundary_hidden)
+            ),
+            "payload_losing_authority_level_logits": (
+                self.payload_losing_authority_level_head(boundary_hidden)
+            ),
             "payload_tool_name_logits": self.payload_tool_name_head(boundary_hidden),
             "payload_route_step_logits": self.payload_route_step_head(boundary_hidden),
             "value_vector": self.value_head(boundary_hidden),

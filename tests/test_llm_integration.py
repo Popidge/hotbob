@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import MethodType
+
 import pytest
 import torch
 from torch import nn
@@ -39,7 +41,8 @@ from hotbob.llm.qwen_memory_model import QwenMemoryConfig, QwenMemoryModel
 from hotbob.llm.train import build_arg_parser as build_train_arg_parser
 from hotbob.llm.train import main as llm_train_main
 from hotbob.model.memory_bank import MemoryBank
-from hotbob.training.dataset import build_scope_vocab
+from hotbob.model.memory_write import MemoryWrite
+from hotbob.training.dataset import build_scope_vocab, structured_targets_from_payload
 
 
 class TinyTokenizer:
@@ -223,6 +226,109 @@ def test_memory_prefix_shape_matches_model_hidden_size() -> None:
     assert attention.shape == (1, 4)
 
 
+def test_qwen_memory_config_prefix_metadata_defaults_to_none() -> None:
+    assert QwenMemoryConfig().memory_prefix_metadata_mode == "none"
+
+
+def test_memory_prefix_metadata_mode_preserves_shape_and_uses_ids() -> None:
+    bank = MemoryBank(num_slots=2, d_model=8)
+    bank.reset(batch_size=1)
+    vector = torch.ones(8)
+    bank.apply_write(0, 0, vector, type_id=1, scope_id=1, privacy_id=1, authority_id=1)
+    bank.apply_write(0, 1, vector, type_id=2, scope_id=1, privacy_id=1, authority_id=1)
+    query = torch.randn(1, 8)
+    none_adapter = MemoryPrefixAdapter(hidden_size=8, memory_prefix_len=4)
+    metadata_adapter = MemoryPrefixAdapter(
+        hidden_size=8,
+        memory_prefix_len=4,
+        num_types=4,
+        num_scopes=3,
+        num_privacy=3,
+        num_authority=4,
+        num_payload_kinds=4,
+        num_policy_actions=8,
+        num_authority_levels=8,
+        metadata_mode="metadata",
+    )
+    none_prefix, _ = none_adapter(query, bank, torch.tensor([1]))
+    metadata_prefix, attention = metadata_adapter(query, bank, torch.tensor([1]))
+    bank.type_ids[0, 1] = bank.type_ids[0, 0]
+    same_metadata_prefix, _ = metadata_adapter(query, bank, torch.tensor([1]))
+    assert metadata_prefix.shape == none_prefix.shape == (1, 4, 8)
+    assert attention.shape == (1, 2)
+    assert not torch.allclose(metadata_prefix, same_metadata_prefix)
+
+
+def test_memory_prefix_metadata_mode_uses_structured_payload_ids() -> None:
+    bank = MemoryBank(num_slots=2, d_model=8)
+    bank.reset(batch_size=1)
+    vector = torch.ones(8)
+    bank.apply_write(
+        0,
+        0,
+        vector,
+        type_id=1,
+        scope_id=1,
+        privacy_id=1,
+        authority_id=1,
+        payload_kind_id=1,
+        payload_default_action_id=1,
+        payload_winning_authority_level_id=1,
+        payload_losing_authority_level_id=1,
+    )
+    bank.apply_write(
+        0,
+        1,
+        vector,
+        type_id=1,
+        scope_id=1,
+        privacy_id=1,
+        authority_id=1,
+        payload_kind_id=1,
+        payload_default_action_id=2,
+        payload_winning_authority_level_id=3,
+        payload_losing_authority_level_id=4,
+    )
+    adapter = MemoryPrefixAdapter(
+        hidden_size=8,
+        memory_prefix_len=4,
+        num_types=4,
+        num_scopes=3,
+        num_privacy=3,
+        num_authority=4,
+        num_payload_kinds=4,
+        num_policy_actions=8,
+        num_authority_levels=8,
+        metadata_mode="metadata",
+    )
+    query = torch.randn(1, 8)
+    prefix, _ = adapter(query, bank, torch.tensor([1]))
+    bank.payload_default_action_ids[0, 1] = bank.payload_default_action_ids[0, 0]
+    bank.payload_winning_authority_level_ids[0, 1] = (
+        bank.payload_winning_authority_level_ids[0, 0]
+    )
+    bank.payload_losing_authority_level_ids[0, 1] = (
+        bank.payload_losing_authority_level_ids[0, 0]
+    )
+    same_payload_prefix, _ = adapter(query, bank, torch.tensor([1]))
+    assert not torch.allclose(prefix, same_payload_prefix)
+
+
+def test_memory_write_outputs_winning_and_losing_authority_heads() -> None:
+    writer = MemoryWrite(
+        d_model=8,
+        num_slots=4,
+        num_types=3,
+        num_scopes=3,
+        num_privacy=2,
+        num_authority=3,
+        num_authority_levels=7,
+    )
+    outputs = writer(torch.randn(2, 8))
+    assert outputs["payload_winning_authority_level_logits"].shape == (2, 7)
+    assert outputs["payload_losing_authority_level_logits"].shape == (2, 7)
+
+
 def test_attention_correction_adapter_cpu_smoke_forward() -> None:
     bank = MemoryBank(num_slots=3, d_model=8)
     bank.reset(batch_size=1)
@@ -321,6 +427,49 @@ def test_teacher_forced_memory_changes_generated_logits_versus_context_only() ->
     )
     assert memory_logits.shape[1] == context_logits.shape[1] + model.config_obj.memory_prefix_len
     assert not torch.allclose(memory_logits[:, : context_logits.shape[1]], context_logits)
+
+
+def test_llm_memory_value_encoding_uses_structured_payload_text(monkeypatch) -> None:
+    task_trace = next(
+        trace for trace in generate_traces(32, seed=7) if trace.task_family == "authority_conflict"
+    )
+    llm_trace = task_trace_to_llm_trace(task_trace)
+    model = tiny_memory_model([task_trace])
+    captured: list[str] = []
+
+    def fake_encode_event(role: str, content: str, scope: str | None = None) -> torch.Tensor:
+        if role == "MEMORY_VALUE":
+            captured.append(content)
+        return torch.ones((1, model.hidden_size))
+
+    monkeypatch.setattr(model, "encode_event", fake_encode_event)
+    model.apply_teacher_trace_memory(llm_trace)
+    model.write_supervision_loss(llm_trace)
+    assert any("authority_rule" in item for item in captured)
+    assert any("tool_unverified" in item or "model_inferred" in item for item in captured)
+
+
+def test_teacher_forced_memory_stores_structured_payload_metadata() -> None:
+    task_trace = next(
+        trace for trace in generate_traces(32, seed=7) if trace.task_family == "authority_conflict"
+    )
+    llm_trace = task_trace_to_llm_trace(task_trace)
+    model = tiny_memory_model([task_trace])
+    model.apply_teacher_trace_memory(llm_trace)
+    structured = structured_targets_from_payload(llm_trace.expected_memory_ops[0].payload)
+    assert int(model.memory.payload_kind_ids[0, 0].item()) == structured["payload_kind_id"]
+    assert (
+        int(model.memory.payload_default_action_ids[0, 0].item())
+        == structured["default_action_id"]
+    )
+    assert (
+        int(model.memory.payload_winning_authority_level_ids[0, 0].item())
+        == structured["winning_authority_level_id"]
+    )
+    assert (
+        int(model.memory.payload_losing_authority_level_ids[0, 0].item())
+        == structured["losing_authority_level_id"]
+    )
 
 
 def test_attention_qo_memory_changes_logits_without_prefix_tokens() -> None:
@@ -436,16 +585,23 @@ def test_llm_train_and_evaluate_argument_parsing_accept_attention_modes() -> Non
             "attention_qo",
             "--memory-state-mode",
             "by_type",
+            "--memory-prefix-metadata-mode",
+            "metadata",
             "--attention-patch-layers",
             "last4",
             "--freeze-base",
+            "--family-loss-weight",
+            "authority_conflict=2",
         ]
     )
     assert train_args.integration_mode == "attention_qo"
     assert train_args.memory_state_mode == "by_type"
+    assert train_args.memory_prefix_metadata_mode == "metadata"
     assert train_args.attention_patch_layers == "last4"
+    assert train_args.family_loss_weight == ["authority_conflict=2"]
     assert train_args.freeze_base
     assert train_args.structured_loss_weight == 0.2
+    assert train_args.authority_payload_loss_weight == 1.0
     assert train_args.memory_heads_checkpoint is None
     assert not train_args.freeze_memory_heads
     assert train_args.lora_backend == "none"
@@ -463,10 +619,13 @@ def test_llm_train_and_evaluate_argument_parsing_accept_attention_modes() -> Non
             "--lora-target-modules",
             "q_proj",
             "o_proj",
+            "--authority-payload-loss-weight",
+            "4.0",
         ]
     )
     assert lora_args.lora_backend == "peft"
     assert lora_args.lora_r == 8
+    assert lora_args.authority_payload_loss_weight == 4.0
     assert lora_args.lora_target_modules == ["q_proj", "o_proj"]
     assert lora_args.memory_heads_checkpoint == "runs/qwen_memory/controller.pt"
     assert lora_args.freeze_memory_heads
@@ -489,6 +648,44 @@ def test_llm_train_and_evaluate_argument_parsing_accept_attention_modes() -> Non
         ["--traces", "data/llm_eval.jsonl", "--batch-size", "2"]
     )
     assert eval_args.batch_size == 2
+
+
+def test_authority_payload_loss_weight_scales_failing_write_heads() -> None:
+    task_trace = next(
+        trace for trace in generate_traces(40, seed=3) if trace.task_family == "authority_conflict"
+    )
+    llm_trace = task_trace_to_llm_trace(task_trace)
+    model = tiny_memory_model([task_trace])
+
+    def fixed_forward_event(self, role, content, scope=None):
+        hidden = torch.zeros((1, self.hidden_size), requires_grad=True)
+        return {
+            "op_logits": torch.zeros((1, 32), requires_grad=True),
+            "type_logits": torch.zeros((1, 32), requires_grad=True),
+            "scope_logits": torch.zeros((1, 32), requires_grad=True),
+            "privacy_logits": torch.zeros((1, 32), requires_grad=True),
+            "authority_logits": torch.zeros((1, 32), requires_grad=True),
+            "slot_logits": torch.zeros((1, self.config_obj.num_memory_slots), requires_grad=True),
+            "value_vector": hidden,
+            "payload_kind_logits": torch.zeros((1, 16), requires_grad=True),
+            "payload_default_action_logits": torch.zeros((1, 16), requires_grad=True),
+            "payload_trigger_logits": torch.zeros((1, 16), requires_grad=True),
+            "payload_exception_logits": torch.zeros((1, 16), requires_grad=True),
+            "payload_expiry_policy_logits": torch.zeros((1, 16), requires_grad=True),
+            "payload_authority_level_logits": torch.zeros((1, 32), requires_grad=True),
+            "payload_winning_authority_level_logits": torch.zeros((1, 32), requires_grad=True),
+            "payload_losing_authority_level_logits": torch.zeros((1, 32), requires_grad=True),
+            "payload_tool_name_logits": torch.zeros((1, 16), requires_grad=True),
+            "payload_route_step_logits": torch.zeros((1, 8), requires_grad=True),
+        }
+
+    model.forward_event = MethodType(fixed_forward_event, model)
+    model.config_obj.authority_payload_loss_weight = 1.0
+    base_loss = model.write_supervision_loss(llm_trace)
+    model.config_obj.authority_payload_loss_weight = 4.0
+    weighted_loss = model.write_supervision_loss(llm_trace)
+
+    assert weighted_loss > base_loss
 
 
 def test_llm_evaluate_reports_mode_and_integration_metrics() -> None:
@@ -597,6 +794,7 @@ def test_llm_train_batch_size_two_writes_checkpoint(tmp_path, monkeypatch) -> No
     assert state["config"]["correction_rank"] == 4
     assert state["config"]["attention_patch_layers"] == "last1"
     assert state["config"]["structured_loss_weight"] == 0.2
+    assert state["config"]["authority_payload_loss_weight"] == 1.0
     assert len(state["losses"]) == 1
 
 
@@ -807,6 +1005,7 @@ def test_architecture_compare_runs_tiny_matrix(tmp_path, monkeypatch) -> None:
     result = run_architecture_comparison(args)
     assert (run_dir / "comparison.json").exists()
     assert result["config"]["structured_loss_weight"] == 0.2
+    assert result["config"]["authority_payload_loss_weight"] == 1.0
     assert len(result["training"]) == 2
     assert len(result["evaluation"]) == 2
     assert result["training"][1]["variant"]["memory_state_mode"] == "by_type"

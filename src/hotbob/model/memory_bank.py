@@ -9,6 +9,7 @@ class MemoryBank:
     Shapes:
       vectors: [batch, num_slots, d_model]
       occupied/strength/type_ids/scope_ids/privacy_ids/authority_ids: [batch, num_slots]
+      payload_*_ids: optional structured payload metadata, [batch, num_slots]
     """
 
     def __init__(self, num_slots: int, d_model: int, device: torch.device | str = "cpu") -> None:
@@ -26,6 +27,14 @@ class MemoryBank:
         self.scope_ids = torch.zeros(shape, dtype=torch.long, device=self.device)
         self.privacy_ids = torch.zeros(shape, dtype=torch.long, device=self.device)
         self.authority_ids = torch.zeros(shape, dtype=torch.long, device=self.device)
+        self.payload_kind_ids = torch.zeros(shape, dtype=torch.long, device=self.device)
+        self.payload_default_action_ids = torch.zeros(shape, dtype=torch.long, device=self.device)
+        self.payload_winning_authority_level_ids = torch.zeros(
+            shape, dtype=torch.long, device=self.device
+        )
+        self.payload_losing_authority_level_ids = torch.zeros(
+            shape, dtype=torch.long, device=self.device
+        )
 
     def clone_empty_like(self) -> MemoryBank:
         clone = MemoryBank(self.num_slots, self.d_model, device=self.device)
@@ -42,6 +51,16 @@ class MemoryBank:
         repeated.scope_ids = self.scope_ids[:1].repeat(batch_size, 1)
         repeated.privacy_ids = self.privacy_ids[:1].repeat(batch_size, 1)
         repeated.authority_ids = self.authority_ids[:1].repeat(batch_size, 1)
+        repeated.payload_kind_ids = self.payload_kind_ids[:1].repeat(batch_size, 1)
+        repeated.payload_default_action_ids = self.payload_default_action_ids[:1].repeat(
+            batch_size, 1
+        )
+        repeated.payload_winning_authority_level_ids = (
+            self.payload_winning_authority_level_ids[:1].repeat(batch_size, 1)
+        )
+        repeated.payload_losing_authority_level_ids = (
+            self.payload_losing_authority_level_ids[:1].repeat(batch_size, 1)
+        )
         return repeated
 
     def decay(self, rate: float) -> None:
@@ -58,6 +77,10 @@ class MemoryBank:
         scope_id: int,
         privacy_id: int,
         authority_id: int,
+        payload_kind_id: int = 0,
+        payload_default_action_id: int = 0,
+        payload_winning_authority_level_id: int = 0,
+        payload_losing_authority_level_id: int = 0,
         strength: float = 1.0,
     ) -> None:
         self.vectors[batch_idx, slot_idx] = vector.to(self.device)
@@ -67,6 +90,14 @@ class MemoryBank:
         self.scope_ids[batch_idx, slot_idx] = scope_id
         self.privacy_ids[batch_idx, slot_idx] = privacy_id
         self.authority_ids[batch_idx, slot_idx] = authority_id
+        self.payload_kind_ids[batch_idx, slot_idx] = payload_kind_id
+        self.payload_default_action_ids[batch_idx, slot_idx] = payload_default_action_id
+        self.payload_winning_authority_level_ids[
+            batch_idx, slot_idx
+        ] = payload_winning_authority_level_id
+        self.payload_losing_authority_level_ids[
+            batch_idx, slot_idx
+        ] = payload_losing_authority_level_id
 
     def apply_update(
         self, batch_idx: int, slot_idx: int, vector: torch.Tensor, gate: float = 1.0
@@ -79,6 +110,10 @@ class MemoryBank:
         self.vectors[batch_idx, slot_idx].zero_()
         self.occupied[batch_idx, slot_idx] = False
         self.strength[batch_idx, slot_idx] = 0.0
+        self.payload_kind_ids[batch_idx, slot_idx] = 0
+        self.payload_default_action_ids[batch_idx, slot_idx] = 0
+        self.payload_winning_authority_level_ids[batch_idx, slot_idx] = 0
+        self.payload_losing_authority_level_ids[batch_idx, slot_idx] = 0
 
     def active_mask(self, current_scope: torch.Tensor) -> torch.Tensor:
         scope_match = self.scope_ids == current_scope.to(self.device).unsqueeze(-1)
@@ -105,6 +140,14 @@ class MemoryBank:
                 scope_id = int(self.scope_ids[b, s].item())
                 privacy_id = int(self.privacy_ids[b, s].item())
                 authority_id = int(self.authority_ids[b, s].item())
+                payload_kind_id = int(self.payload_kind_ids[b, s].item())
+                payload_default_action_id = int(self.payload_default_action_ids[b, s].item())
+                payload_winning_authority_level_id = int(
+                    self.payload_winning_authority_level_ids[b, s].item()
+                )
+                payload_losing_authority_level_id = int(
+                    self.payload_losing_authority_level_ids[b, s].item()
+                )
                 rows.append(
                     {
                         "batch": b,
@@ -116,6 +159,10 @@ class MemoryBank:
                         "scope_id": scope_id,
                         "privacy_id": privacy_id,
                         "authority_id": authority_id,
+                        "payload_kind_id": payload_kind_id,
+                        "payload_default_action_id": payload_default_action_id,
+                        "payload_winning_authority_level_id": payload_winning_authority_level_id,
+                        "payload_losing_authority_level_id": payload_losing_authority_level_id,
                     }
                 )
                 row = rows[-1]

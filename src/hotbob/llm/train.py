@@ -15,6 +15,16 @@ from hotbob.llm.dataset import build_llm_scope_vocab, build_llm_tool_name_vocab,
 from hotbob.llm.qwen_memory_model import QwenMemoryConfig, QwenMemoryModel
 
 
+def parse_family_weights(values: list[str] | None) -> dict[str, float]:
+    weights: dict[str, float] = {}
+    for value in values or []:
+        if "=" not in value:
+            raise ValueError(f"Invalid family loss weight {value!r}; expected FAMILY=FLOAT")
+        family, raw_weight = value.split("=", 1)
+        weights[family] = float(raw_weight)
+    return weights
+
+
 def batched_cycle(items: list, *, batch_size: int, steps: int):
     iterator = itertools.cycle(items)
     for _ in range(steps):
@@ -37,11 +47,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default="prefix",
     )
     parser.add_argument("--memory-state-mode", choices=["shared", "by_type"], default="shared")
+    parser.add_argument(
+        "--memory-prefix-metadata-mode",
+        choices=["none", "metadata"],
+        default="none",
+    )
     parser.add_argument("--correction-rank", type=int, default=16)
     parser.add_argument("--attention-patch-layers", default="all")
     parser.add_argument("--freeze-base", action="store_true")
     parser.add_argument("--write-loss-weight", type=float, default=0.2)
     parser.add_argument("--structured-loss-weight", type=float, default=0.2)
+    parser.add_argument("--authority-payload-loss-weight", type=float, default=1.0)
     parser.add_argument("--memory-heads-checkpoint", default=None)
     parser.add_argument("--freeze-memory-heads", action="store_true")
     parser.add_argument("--lora-backend", choices=["none", "peft"], default="none")
@@ -55,6 +71,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--memory-lr", type=float, default=1e-4)
     parser.add_argument("--lora-lr", type=float, default=2e-4)
+    parser.add_argument("--family-loss-weight", action="append", default=None)
     parser.add_argument("--out", default="runs/qwen_memory/latest.pt")
     return parser
 
@@ -71,9 +88,11 @@ def train_checkpoint(
         freeze_base=args.freeze_base,
         integration_mode=args.integration_mode,
         memory_state_mode=args.memory_state_mode,
+        memory_prefix_metadata_mode=getattr(args, "memory_prefix_metadata_mode", "none"),
         correction_rank=args.correction_rank,
         attention_patch_layers=args.attention_patch_layers,
         structured_loss_weight=getattr(args, "structured_loss_weight", 0.2),
+        authority_payload_loss_weight=getattr(args, "authority_payload_loss_weight", 1.0),
         scope_vocab=build_llm_scope_vocab(traces),
         tool_name_vocab=build_llm_tool_name_vocab(traces),
         lora_backend=getattr(args, "lora_backend", "none"),
@@ -125,6 +144,7 @@ def train_checkpoint(
     optimizer = torch.optim.AdamW(param_groups)
     model.train()
     losses: list[float] = []
+    family_loss_weights = parse_family_weights(getattr(args, "family_loss_weight", None))
     progress = tqdm(
         batched_cycle(traces, batch_size=max(args.batch_size, 1), steps=args.steps),
         total=args.steps,
@@ -135,7 +155,9 @@ def train_checkpoint(
         for trace in batch:
             lm_loss = model.teacher_forced_lm_loss(trace)
             write_loss = model.write_supervision_loss(trace)
-            trace_losses.append(lm_loss + args.write_loss_weight * write_loss)
+            family = str(trace.metadata.get("task_family", "unknown"))
+            weight = family_loss_weights.get(family, 1.0)
+            trace_losses.append(weight * (lm_loss + args.write_loss_weight * write_loss))
         loss = torch.stack(trace_losses).mean()
         loss.backward()
         optimizer.step()

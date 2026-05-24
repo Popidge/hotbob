@@ -1,7 +1,18 @@
+import pytest
+
 from hotbob.data.generate import main as generate_main
-from hotbob.data.traces import generate_traces, read_jsonl, write_jsonl
-from hotbob.training.dataset import TraceDataset, collate_traces
-from hotbob.types import MemoryAuthority, MemoryOpName, MemoryPrivacy, MemoryType
+from hotbob.data.traces import generate_traces, generate_weighted_traces, read_jsonl, write_jsonl
+from hotbob.training.dataset import TraceDataset, collate_traces, structured_targets_from_payload
+from hotbob.types import (
+    AuthorityLevel,
+    AuthorityRulePayload,
+    MemoryAuthority,
+    MemoryOpName,
+    MemoryPayloadKind,
+    MemoryPrivacy,
+    MemoryType,
+    PolicyAction,
+)
 
 
 def test_generation_covers_all_families_and_ops_are_typed() -> None:
@@ -47,6 +58,8 @@ def test_structured_payload_targets_are_collated() -> None:
         "event_trigger_ids",
         "event_expiry_policy_ids",
         "event_authority_level_ids",
+        "event_winning_authority_level_ids",
+        "event_losing_authority_level_ids",
         "event_tool_name_ids",
         "event_route_step_ids",
         "event_has_payload",
@@ -62,6 +75,14 @@ def test_structured_payload_targets_are_collated() -> None:
     assert standing.trigger_id > 0
     assert standing.expiry_policy_id > 0
     assert standing.authority_level_id > 0
+    assert standing.winning_authority_level_id > 0
+    authority = next(
+        dataset[idx]
+        for idx, trace in enumerate(traces)
+        if trace.task_family == "authority_conflict"
+    )
+    assert authority.winning_authority_level_id > 0
+    assert authority.losing_authority_level_id > 0
     routing = next(
         dataset[idx]
         for idx, trace in enumerate(traces)
@@ -81,6 +102,39 @@ def test_structured_payload_targets_are_collated() -> None:
         if trace.task_family == "active_expiry"
         for op in trace.expected_memory_ops
     )
+
+
+def test_structured_authority_targets_include_winning_and_losing_levels() -> None:
+    targets = structured_targets_from_payload(
+        AuthorityRulePayload(
+            kind=MemoryPayloadKind.AUTHORITY_RULE,
+            subject_key="conflict",
+            winning_authority=AuthorityLevel.CAPTAIN,
+            losing_authority=AuthorityLevel.TOOL_UNVERIFIED,
+            conflict_action=PolicyAction.ASK_CLARIFICATION,
+        )
+    )
+    assert targets["winning_authority_level_id"] > 0
+    assert targets["losing_authority_level_id"] > 0
+    assert targets["has_winning_authority_level"] is True
+    assert targets["has_losing_authority_level"] is True
+
+
+def test_weighted_generation_invalid_family_and_authority_fraction() -> None:
+    with pytest.raises(ValueError, match="Valid families"):
+        generate_weighted_traces(4, seed=1, family_weights={"missing": 2.0})
+    default_fraction = sum(
+        trace.task_family == "authority_conflict" for trace in generate_traces(200, seed=3)
+    )
+    weighted_fraction = sum(
+        trace.task_family == "authority_conflict"
+        for trace in generate_weighted_traces(
+            200,
+            seed=3,
+            family_weights={"authority_conflict": 8.0},
+        )
+    )
+    assert weighted_fraction > default_fraction
 
 
 def test_generate_train_eval_split(tmp_path, monkeypatch) -> None:

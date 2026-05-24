@@ -100,6 +100,7 @@ def train_args_for_variant(
         freeze_base=args.freeze_base,
         write_loss_weight=args.write_loss_weight,
         structured_loss_weight=args.structured_loss_weight,
+        authority_payload_loss_weight=args.authority_payload_loss_weight,
         out=str(checkpoint_path),
     )
 
@@ -162,6 +163,7 @@ def run_architecture_comparison(args: argparse.Namespace) -> dict[str, Any]:
             "correction_rank": args.correction_rank,
             "write_loss_weight": args.write_loss_weight,
             "structured_loss_weight": args.structured_loss_weight,
+            "authority_payload_loss_weight": args.authority_payload_loss_weight,
             "freeze_base": args.freeze_base,
             "decode_strategy": args.decode_strategy,
             "eval_modes": args.eval_modes,
@@ -185,6 +187,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--correction-rank", type=int, default=16)
     parser.add_argument("--write-loss-weight", type=float, default=0.2)
     parser.add_argument("--structured-loss-weight", type=float, default=0.2)
+    parser.add_argument("--authority-payload-loss-weight", type=float, default=1.0)
     parser.add_argument("--freeze-base", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--run-dir", default="runs/qwen_memory/architecture_compare")
     parser.add_argument("--report-name", default="comparison.json")

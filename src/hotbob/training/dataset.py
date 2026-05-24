@@ -198,6 +198,8 @@ class EncodedTrace:
     event_exception_ids: list[int]
     event_expiry_policy_ids: list[int]
     event_authority_level_ids: list[int]
+    event_winning_authority_level_ids: list[int]
+    event_losing_authority_level_ids: list[int]
     event_tool_name_ids: list[int]
     event_route_step_ids: list[int]
     event_has_write: list[bool]
@@ -206,6 +208,8 @@ class EncodedTrace:
     event_has_default_action: list[bool]
     event_has_expiry_policy: list[bool]
     event_has_authority_level: list[bool]
+    event_has_winning_authority_level: list[bool]
+    event_has_losing_authority_level: list[bool]
     event_has_tool_name: list[bool]
     event_has_route_step: list[bool]
     event_memory_value_tokens: list[list[int]]
@@ -225,6 +229,8 @@ class EncodedTrace:
     exception_id: int
     expiry_policy_id: int
     authority_level_id: int
+    winning_authority_level_id: int
+    losing_authority_level_id: int
     tool_name_id: int
     route_step_id: int
 
@@ -252,6 +258,8 @@ def structured_targets_from_payload(
         "exception_id": 0,
         "expiry_policy_id": 0,
         "authority_level_id": 0,
+        "winning_authority_level_id": 0,
+        "losing_authority_level_id": 0,
         "tool_name_id": 0,
         "route_step_id": 0,
         "has_payload": True,
@@ -259,6 +267,8 @@ def structured_targets_from_payload(
         "has_default_action": False,
         "has_expiry_policy": False,
         "has_authority_level": False,
+        "has_winning_authority_level": False,
+        "has_losing_authority_level": False,
         "has_tool_name": False,
         "has_route_step": False,
     }
@@ -271,10 +281,12 @@ def structured_targets_from_payload(
             else 0,
             expiry_policy_id=EXPIRY_POLICY_TO_ID[payload.expiry_policy],
             authority_level_id=AUTHORITY_LEVEL_TO_ID[payload.authority_level],
+            winning_authority_level_id=AUTHORITY_LEVEL_TO_ID[payload.authority_level],
             has_trigger=True,
             has_default_action=True,
             has_expiry_policy=True,
             has_authority_level=True,
+            has_winning_authority_level=True,
         )
     elif isinstance(payload, ExpiryRulePayload):
         targets.update(
@@ -287,8 +299,12 @@ def structured_targets_from_payload(
         targets.update(
             default_action_id=POLICY_ACTION_TO_ID[payload.conflict_action],
             authority_level_id=AUTHORITY_LEVEL_TO_ID[payload.winning_authority],
+            winning_authority_level_id=AUTHORITY_LEVEL_TO_ID[payload.winning_authority],
+            losing_authority_level_id=AUTHORITY_LEVEL_TO_ID[payload.losing_authority],
             has_default_action=True,
             has_authority_level=True,
+            has_winning_authority_level=True,
+            has_losing_authority_level=True,
         )
     elif isinstance(payload, ToolFactPayload):
         targets.update(
@@ -384,6 +400,8 @@ class TraceDataset(Dataset[EncodedTrace]):
             event_exception_ids=event_targets["exception_ids"],
             event_expiry_policy_ids=event_targets["expiry_policy_ids"],
             event_authority_level_ids=event_targets["authority_level_ids"],
+            event_winning_authority_level_ids=event_targets["winning_authority_level_ids"],
+            event_losing_authority_level_ids=event_targets["losing_authority_level_ids"],
             event_tool_name_ids=event_targets["tool_name_ids"],
             event_route_step_ids=event_targets["route_step_ids"],
             event_has_write=event_targets["has_write"],
@@ -392,6 +410,8 @@ class TraceDataset(Dataset[EncodedTrace]):
             event_has_default_action=event_targets["has_default_action"],
             event_has_expiry_policy=event_targets["has_expiry_policy"],
             event_has_authority_level=event_targets["has_authority_level"],
+            event_has_winning_authority_level=event_targets["has_winning_authority_level"],
+            event_has_losing_authority_level=event_targets["has_losing_authority_level"],
             event_has_tool_name=event_targets["has_tool_name"],
             event_has_route_step=event_targets["has_route_step"],
             event_memory_value_tokens=event_targets["memory_value_tokens"],
@@ -411,6 +431,8 @@ class TraceDataset(Dataset[EncodedTrace]):
             exception_id=int(payload_targets["exception_id"]),
             expiry_policy_id=int(payload_targets["expiry_policy_id"]),
             authority_level_id=int(payload_targets["authority_level_id"]),
+            winning_authority_level_id=int(payload_targets["winning_authority_level_id"]),
+            losing_authority_level_id=int(payload_targets["losing_authority_level_id"]),
             tool_name_id=int(payload_targets["tool_name_id"]),
             route_step_id=int(payload_targets["route_step_id"]),
         )
@@ -444,6 +466,8 @@ class TraceDataset(Dataset[EncodedTrace]):
         has_default_action: list[bool] = []
         has_expiry_policy: list[bool] = []
         has_authority_level: list[bool] = []
+        has_winning_authority_level: list[bool] = []
+        has_losing_authority_level: list[bool] = []
         has_tool_name: list[bool] = []
         has_route_step: list[bool] = []
         memory_value_tokens: list[list[int]] = []
@@ -453,6 +477,8 @@ class TraceDataset(Dataset[EncodedTrace]):
         exception_ids: list[int] = []
         expiry_policy_ids: list[int] = []
         authority_level_ids: list[int] = []
+        winning_authority_level_ids: list[int] = []
+        losing_authority_level_ids: list[int] = []
         tool_name_ids: list[int] = []
         route_step_ids: list[int] = []
         op_index = 0
@@ -486,6 +512,12 @@ class TraceDataset(Dataset[EncodedTrace]):
                 exception_ids.append(int(structured["exception_id"]))
                 expiry_policy_ids.append(int(structured["expiry_policy_id"]))
                 authority_level_ids.append(int(structured["authority_level_id"]))
+                winning_authority_level_ids.append(
+                    int(structured["winning_authority_level_id"])
+                )
+                losing_authority_level_ids.append(
+                    int(structured["losing_authority_level_id"])
+                )
                 tool_name_ids.append(int(structured["tool_name_id"]))
                 route_step_ids.append(int(structured["route_step_id"]))
                 has_payload.append(bool(structured["has_payload"]))
@@ -493,6 +525,12 @@ class TraceDataset(Dataset[EncodedTrace]):
                 has_default_action.append(bool(structured["has_default_action"]))
                 has_expiry_policy.append(bool(structured["has_expiry_policy"]))
                 has_authority_level.append(bool(structured["has_authority_level"]))
+                has_winning_authority_level.append(
+                    bool(structured["has_winning_authority_level"])
+                )
+                has_losing_authority_level.append(
+                    bool(structured["has_losing_authority_level"])
+                )
                 has_tool_name.append(bool(structured["has_tool_name"]))
                 has_route_step.append(bool(structured["has_route_step"]))
                 op_index += 1
@@ -514,6 +552,8 @@ class TraceDataset(Dataset[EncodedTrace]):
                 exception_ids.append(0)
                 expiry_policy_ids.append(0)
                 authority_level_ids.append(0)
+                winning_authority_level_ids.append(0)
+                losing_authority_level_ids.append(0)
                 tool_name_ids.append(0)
                 route_step_ids.append(0)
                 has_payload.append(False)
@@ -521,6 +561,8 @@ class TraceDataset(Dataset[EncodedTrace]):
                 has_default_action.append(False)
                 has_expiry_policy.append(False)
                 has_authority_level.append(False)
+                has_winning_authority_level.append(False)
+                has_losing_authority_level.append(False)
                 has_tool_name.append(False)
                 has_route_step.append(False)
         return {
@@ -538,6 +580,8 @@ class TraceDataset(Dataset[EncodedTrace]):
             "exception_ids": exception_ids,
             "expiry_policy_ids": expiry_policy_ids,
             "authority_level_ids": authority_level_ids,
+            "winning_authority_level_ids": winning_authority_level_ids,
+            "losing_authority_level_ids": losing_authority_level_ids,
             "tool_name_ids": tool_name_ids,
             "route_step_ids": route_step_ids,
             "has_write": has_write,
@@ -546,6 +590,8 @@ class TraceDataset(Dataset[EncodedTrace]):
             "has_default_action": has_default_action,
             "has_expiry_policy": has_expiry_policy,
             "has_authority_level": has_authority_level,
+            "has_winning_authority_level": has_winning_authority_level,
+            "has_losing_authority_level": has_losing_authority_level,
             "has_tool_name": has_tool_name,
             "has_route_step": has_route_step,
             "memory_value_tokens": memory_value_tokens,
@@ -621,6 +667,12 @@ def collate_traces(batch: Sequence[EncodedTrace]) -> dict[str, torch.Tensor]:
         "event_authority_level_ids": _pad_event_labels(
             batch, "event_authority_level_ids", max_events
         ),
+        "event_winning_authority_level_ids": _pad_event_labels(
+            batch, "event_winning_authority_level_ids", max_events
+        ),
+        "event_losing_authority_level_ids": _pad_event_labels(
+            batch, "event_losing_authority_level_ids", max_events
+        ),
         "event_tool_name_ids": _pad_event_labels(batch, "event_tool_name_ids", max_events),
         "event_route_step_ids": _pad_event_labels(batch, "event_route_step_ids", max_events),
         "event_has_write": _pad_event_bools(batch, "event_has_write", max_events),
@@ -634,6 +686,12 @@ def collate_traces(batch: Sequence[EncodedTrace]) -> dict[str, torch.Tensor]:
         ),
         "event_has_authority_level": _pad_event_bools(
             batch, "event_has_authority_level", max_events
+        ),
+        "event_has_winning_authority_level": _pad_event_bools(
+            batch, "event_has_winning_authority_level", max_events
+        ),
+        "event_has_losing_authority_level": _pad_event_bools(
+            batch, "event_has_losing_authority_level", max_events
         ),
         "event_has_tool_name": _pad_event_bools(batch, "event_has_tool_name", max_events),
         "event_has_route_step": _pad_event_bools(batch, "event_has_route_step", max_events),
@@ -661,6 +719,12 @@ def collate_traces(batch: Sequence[EncodedTrace]) -> dict[str, torch.Tensor]:
         ),
         "authority_level_ids": torch.tensor(
             [item.authority_level_id for item in batch], dtype=torch.long
+        ),
+        "winning_authority_level_ids": torch.tensor(
+            [item.winning_authority_level_id for item in batch], dtype=torch.long
+        ),
+        "losing_authority_level_ids": torch.tensor(
+            [item.losing_authority_level_id for item in batch], dtype=torch.long
         ),
         "tool_name_ids": torch.tensor([item.tool_name_id for item in batch], dtype=torch.long),
         "route_step_ids": torch.tensor([item.route_step_id for item in batch], dtype=torch.long),

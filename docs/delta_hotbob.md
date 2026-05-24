@@ -117,6 +117,30 @@ correction and native transformer memory remain later integration experiments
 after the prefix+LoRA baseline establishes whether a small decoder adapter can
 learn to read the existing memory-prefix channel.
 
+## Authority Memory Reader Follow-Up
+
+Authority is security-relevant for prompt-injection-resistant agent harnesses:
+the model has to prefer stored system, captain, or verified-tool authority over
+lower-authority incoming text without copying hidden/private values into the
+prompt. The current failure appears in both teacher-forced and predicted modes,
+so the first fix has to improve memory readout and encoding rather than only the
+write controller.
+
+Prefix metadata enrichment is a conservative next step before q/o correction or
+native memory gates. It leaves the baseline prefix mode unchanged by default,
+but allows the authority experiment to add learned type, scope, privacy, and
+authority embeddings to memory vectors before prefix readout. The latest
+authority follow-up also stores structured payload metadata on memory slots and
+adds learned prefix embeddings for payload kind, payload action, and winning/
+losing authority levels. The same follow-up encodes full structured authority
+payload text for LLM memory values and adds explicit winning and losing
+authority supervision.
+
+Authority traces now include a small bounded prompt-injection/channel-authority
+slice: system-over-user, captain-over-unverified-tool, and verified-tool-over-
+model-inference conflicts include realistic lower-authority pressure while the
+target remains the stored authority rule.
+
 ## Attribution
 
 This experiment adapts ideas from:

@@ -36,6 +36,16 @@ STRUCTURED_EVENT_TARGETS = [
     ("payload_exception_logits", "event_exception_ids", "event_exception_ids"),
     ("payload_expiry_policy_logits", "event_expiry_policy_ids", "event_has_expiry_policy"),
     ("payload_authority_level_logits", "event_authority_level_ids", "event_has_authority_level"),
+    (
+        "payload_winning_authority_level_logits",
+        "event_winning_authority_level_ids",
+        "event_has_winning_authority_level",
+    ),
+    (
+        "payload_losing_authority_level_logits",
+        "event_losing_authority_level_ids",
+        "event_has_losing_authority_level",
+    ),
     ("payload_tool_name_logits", "event_tool_name_ids", "event_has_tool_name"),
     ("payload_route_step_logits", "event_route_step_ids", "event_has_route_step"),
 ]
@@ -84,6 +94,12 @@ def clone_memory_for_forward(memory: MemoryBank) -> MemoryBank:
     clone.scope_ids = memory.scope_ids.clone()
     clone.privacy_ids = memory.privacy_ids.clone()
     clone.authority_ids = memory.authority_ids.clone()
+    clone.payload_kind_ids = memory.payload_kind_ids.clone()
+    clone.payload_default_action_ids = memory.payload_default_action_ids.clone()
+    clone.payload_winning_authority_level_ids = (
+        memory.payload_winning_authority_level_ids.clone()
+    )
+    clone.payload_losing_authority_level_ids = memory.payload_losing_authority_level_ids.clone()
     return clone
 
 
