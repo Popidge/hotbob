@@ -297,7 +297,7 @@ produce the right action under predicted memory?
 Generate authority-heavy controller traces:
 
 ```powershell
-uv run python -m hotbob.data.generate --train-out data/controller_authority_train.jsonl --eval-out data/controller_authority_eval.jsonl --train-n 50000 --eval-n 5000 --seed 51 --family-weight authority_conflict=10 --family-weight tool_verified_override=3 --family-weight scope_isolation=1 --family-weight privacy_disclosure_conflict=1
+uv run python -m hotbob.data.generate --train-out data/controller_authority_train.jsonl --eval-out data/controller_authority_eval.jsonl --train-n 50000 --eval-n 5000 --seed 51 --family-weight authority_conflict=10 --family-weight tool_verified_override=3 --family-weight stale_state_replacement=1 --family-weight privacy_disclosure_conflict=1
 ```
 
 Train the compact controller:
